@@ -5,6 +5,7 @@ port, and nothing reaches a real service.
 import http.client
 import http.server
 import json
+import os
 from pathlib import Path
 import sys
 import threading
@@ -14,6 +15,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
+# These tests exercise the SWE-2 route, which is off by default.
+os.environ.setdefault("DEVINX_SWE", "1")
 
 import devinx
 from test_audit_fixes import LiveServer
@@ -118,8 +121,14 @@ class GptRouteTests(unittest.TestCase):
         self.assertEqual(status, 200)
         ids = [m['id'] for m in body['data']]
         self.assertEqual(body['first_id'], 'swe-2')
-        for mid, _ in devinx.GPT_MODELS:
-            self.assertIn(mid, ids)
+        models = {m['id']: m for m in body['data']}
+        for mid, context in (('gpt-6.1-sol', 500000),
+                             ('gpt-6-astra', 272000),
+                             ('gpt-6-luna', 272000)):
+            with self.subTest(model=mid):
+                self.assertIn(mid, ids)
+                self.assertEqual(models[mid]['context_window'], context)
+                self.assertEqual(models[mid]['runtime']['max_input_tokens'], context)
 
     def test_sidecar_down_is_a_502(self):
         self.sidecar.close()
@@ -138,10 +147,15 @@ class GptRouteTests(unittest.TestCase):
         self.sidecar.status = 413
         self.sidecar.body = b'{"type":"error","error":{"type":"request_too_large",' \
                             b'"message":"input exceeds the context window"}}'
-        status, body = post(self.live.port, '/v1/messages', GPT_BODY)
-        self.assertEqual(status, 400)
-        self.assertRegex(body['error']['message'],
-                         r'prompt is too long[^0-9]*\d+ tokens? > 272000')
+        for mid, context in (('gpt-6.1-sol', 500000),
+                             ('gpt-6-astra', 272000),
+                             ('gpt-6-luna', 272000)):
+            with self.subTest(model=mid):
+                status, body = post(self.live.port, '/v1/messages',
+                                    dict(GPT_BODY, model=mid))
+                self.assertEqual(status, 400)
+                self.assertRegex(body['error']['message'],
+                                 rf'prompt is too long[^0-9]*\d+ tokens? > {context}')
 
     def test_other_errors_pass_through(self):
         self.sidecar.status = 429
@@ -389,6 +403,41 @@ class ForeignThinkingTests(unittest.TestCase):
         self.assertEqual(block, {'type': 'thinking', 'thinking': 'plan'})
 
 
+class GptContextTests(unittest.TestCase):
+
+    def test_default_compaction_thresholds(self):
+        with mock.patch.object(devinx, 'GPT_COMPACT_AT', None):
+            for model, threshold in (('gpt-6.1-sol', 450000),
+                                     ('gpt-6-astra', 244800),
+                                     ('gpt-6-luna', 244800)):
+                with self.subTest(model=model):
+                    self.assertEqual(devinx.gpt_compact_at(model), threshold)
+
+    def test_explicit_compaction_override_applies_to_every_model(self):
+        with mock.patch.object(devinx, 'GPT_COMPACT_AT', 123456):
+            for model, _ in devinx.GPT_MODELS:
+                self.assertEqual(devinx.gpt_compact_at(model), 123456)
+
+    def test_subagent_compaction_uses_each_models_threshold(self):
+        handler = object.__new__(devinx.Handler)
+        for model, threshold in (('gpt-6.1-sol', 450000),
+                                 ('gpt-6-astra', 244800),
+                                 ('gpt-6-luna', 244800)):
+            body = dict(long_history(turns=4, size=1000), model=model)
+            for measured, compact in ((threshold - 1, False), (threshold, True)):
+                with self.subTest(model=model, measured=measured), \
+                     mock.patch.object(devinx, 'GPT_COMPACT_AT', None), \
+                     mock.patch.object(devinx, '_gpt_usage', {}), \
+                     mock.patch.object(devinx, 'estimate_tokens', return_value=measured), \
+                     mock.patch.object(devinx, 'compact_body', return_value=body) as summary:
+                    sent, committed = handler.compact_gpt(body)
+                    self.assertIs(sent, body)
+                    self.assertFalse(committed)
+                    self.assertEqual(summary.call_count, int(compact))
+                    if compact:
+                        self.assertEqual(summary.call_args[0][1].limit, threshold)
+
+
 class PickerSettingsTests(unittest.TestCase):
 
     def test_rows_effort_and_window(self):
@@ -400,11 +449,11 @@ class PickerSettingsTests(unittest.TestCase):
         self.assertEqual([r['label'] for r in rows], ['Sol', 'Astra', 'Luna'])
         for row in rows:
             self.assertEqual(row['behavesAs'], 'claude-opus-5-5')
-            # Claude Code compacts its 33k buffer short of the window: there,
-            # Codex's 90% of 272k.
+            # Claude Code compacts 33k short of the configured window.
+            expected = 450000 if row['model'] == 'gpt-6.1-sol' else 244800
             self.assertEqual(
                 settings['modelSettings'][row['model']]['autoCompactWindow'] - 33000,
-                devinx.GPT_COMPACT_AT)
+                expected)
 
     def test_the_users_own_settings_win(self):
         import launcher

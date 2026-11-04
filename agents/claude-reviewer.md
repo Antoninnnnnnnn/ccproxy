@@ -1,6 +1,6 @@
 ---
 name: claude-reviewer
-description: Independent reviewer running on the session's own claude.ai model rather than SWE-2 — reserve it for high-stakes changes (security, auth, migrations, data integrity, concurrency, payments, anything hard to reverse). It spends claude.ai quota, so use swe2-reviewer for routine review. Never edits files.
+description: Independent reviewer running on the session's own claude.ai model rather than SWE-2 — reserve it for high-stakes changes (security, auth, migrations, data integrity, concurrency, payments, anything hard to reverse). It spends claude.ai quota, so prefer a cheaper reviewer for routine review. Never edits files.
 disallowedTools: Edit, Write, NotebookEdit
 ---
 

@@ -27,6 +27,16 @@ CONFIG_FIELDS = {
 }
 
 
+def swe_enabled():
+    """Whether Devin / SWE-2 access is switched on.
+
+    Off unless DEVINX_SWE=1, in the service and in the launcher alike: they
+    read this one function, so a session never advertises agents the service
+    would refuse. Read at call time, not import time, so a test can flip it.
+    """
+    return os.environ.get('DEVINX_SWE') == '1'
+
+
 # The libraries the service's behaviour depends on. A dependency upgrade is a
 # new service as much as a code change is, and must read as one.
 DEPENDENCIES = ('protobuf', 'requests', 'urllib3')

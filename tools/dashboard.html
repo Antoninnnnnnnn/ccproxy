@@ -921,6 +921,8 @@ function save(){ try{ localStorage.setItem("devinx-range", JSON.stringify(range)
 let fails = 0, inFlight = false;
 async function tick(){
   if (inFlight) return;   // a slow poll must not stack another on top of it
+  // every poll makes the service re-read the log; nobody is looking at a hidden tab
+  if (document.hidden) return;
   inFlight = true;
   try{
     // Relative to the page, so the dashboard works both at :8316/dashboard and
@@ -969,7 +971,8 @@ $("theme").addEventListener("click", () => {
 try{ const t = localStorage.getItem("devinx-theme");
      if (t) document.documentElement.setAttribute("data-theme", t); }catch(e){}
 tick();
-setInterval(tick, 5000);
+setInterval(tick, 15000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });
 </script>
 </body>
 </html>

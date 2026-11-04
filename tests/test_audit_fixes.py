@@ -20,6 +20,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+# These tests exercise the SWE-2 route, which is off by default.
+os.environ.setdefault("DEVINX_SWE", "1")
 import devinx
 
 RATE_ZERO = ("upstream trailer error on a: resource_exhausted: Reached the "

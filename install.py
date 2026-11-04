@@ -29,6 +29,7 @@ import venv
 
 import diagnostics
 import launcher
+from runtime_support import swe_enabled
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MIN_PYTHON = (3, 10)
@@ -627,6 +628,10 @@ def install_codex(force):
 
 def check_credential():
     """The Devin login is interactive and per-machine; it cannot be automated."""
+    if not swe_enabled():
+        say(OK, "Devin / SWE-2 access is disabled (DEVINX_SWE=1 enables it); "
+                "no Devin credential is needed")
+        return False
     dd = data_dir()
     candidates = (os.path.join(dd, "devin", "credentials.toml"),
                   os.path.expanduser("~/devin-shim/data/devin/credentials.toml"),
@@ -680,6 +685,9 @@ def smoke(py, have_credential):
             die(f"smoke test: could not reach /v1/models - {error}")
         say(OK, f"service responds: {', '.join(models)}")
 
+        if not swe_enabled():
+            say(OK, "SWE-2 access is disabled; no live SWE-2 call")
+            return
         if not have_credential:
             say(WARN, "skipping the live SWE-2 call (no credential yet)")
             return
@@ -778,10 +786,10 @@ def main():
     dx = "devinx" if sys.platform != "win32" else "devinx.cmd"
     py = venv_python(HERE)
     print(f"\n    {dx}                plain Claude Code, no proxy\n"
-          f"    {dx} --devin        with the SWE-2 layer  (--d for short)\n"
+          f"    {dx} --devin        {'with the SWE-2 layer' if swe_enabled() else 'with the Claude and GPT agents'}  (--d for short)\n"
           f"    {dx} --d --resume   composes with any claude flag\n\n"
-          f"    {dx} --or            adds /devinx:swe-orchestrator (implies "
-          f"--devin)\n\n"
+          + (f"    {dx} --or            adds /devinx:swe-orchestrator (implies "
+             f"--devin)\n\n" if swe_enabled() else "") +
           f"    launcher: {path}\n"
           f"    plain `claude` still works and bypasses devinx entirely.\n"
           f"    devinx never adds --dangerously-skip-permissions; pass it "

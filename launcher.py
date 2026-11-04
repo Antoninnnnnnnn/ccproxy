@@ -22,7 +22,7 @@ import subprocess
 import sys
 import time
 import urllib.request
-from runtime_support import build_id, hello_proof, service_secret, startup_lock
+from runtime_support import build_id, hello_proof, service_secret, startup_lock, swe_enabled
 
 def _port_env(name, default):
     """A bad DEVINX_PORT must not crash the launcher before main() ever runs
@@ -80,10 +80,13 @@ def _add_no_proxy(env):
 ENV = {
     "ANTHROPIC_BASE_URL": f"http://{HOST}:{PORT}",
     # The alias, not a tier: this is the entry shown in /model, and the effort
-    # slider next to it is what selects medium / high / max.
-    "ANTHROPIC_CUSTOM_MODEL_OPTION": SWE_ALIAS,
-    "ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES":
-        "effort,max_effort,xhigh_effort,per_turn_effort",
+    # slider next to it is what selects medium / high / max. Only while Devin
+    # access is on (DEVINX_SWE=1): off, /model lists no model the service would
+    # refuse.
+    **({"ANTHROPIC_CUSTOM_MODEL_OPTION": SWE_ALIAS,
+        "ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES":
+            "effort,max_effort,xhigh_effort,per_turn_effort"}
+       if swe_enabled() else {}),
     "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
     # Claude Code has no catalog entry for a custom model, so it assumes a 200k
     # window and auto-compacts there unless told otherwise. This states the real
@@ -284,6 +287,10 @@ def packaged_agents():
         name = meta.get("name")
         if not name:
             continue
+        if not swe_enabled() and meta.get("model", "").startswith("swe-"):
+            # The service refuses swe-* models while Devin access is off, so an
+            # agent pinned to one would only fail when invoked.
+            continue
         # Only whitespace is stripped here: the previous lstrip("-\n") also
         # stripped the character '-' itself from the start of the prompt body,
         # eating a leading "- " off a prompt that opened with a markdown list.
@@ -362,9 +369,13 @@ GPT_PICKER = (
 )
 GPT_BEHAVES_AS = "claude-opus-5-5"
 # Claude Code compacts a fixed 33k buffer short of this window (as /context
-# shows), so the window is set to land that point on Codex's own: 90% of
-# 272k = 244800 (codex-rs ModelInfo::auto_compact_token_limit).
-GPT_AUTO_COMPACT_WINDOW = 244800 + 33000
+# shows). Land that point on 90% of each model's window: 450k for Sol,
+# 244800 for Astra and Luna, matching devinx's subagent compaction.
+GPT_AUTO_COMPACT_WINDOW = {
+    "gpt-6.1-sol": 450000 + 33000,
+    "gpt-6-astra": 244800 + 33000,
+    "gpt-6-luna": 244800 + 33000,
+}
 
 
 def picker_settings(passthrough):
@@ -382,9 +393,8 @@ def picker_settings(passthrough):
                 "behavesAs": GPT_BEHAVES_AS}
                for mid, label, desc in GPT_PICKER]
     # The window has to be stated per model. behavesAs also lends Opus's 1M
-    # window, so auto-compact would wait for 1M on a model the ChatGPT backend
-    # cuts at 272k.
-    window = {mid: {"autoCompactWindow": GPT_AUTO_COMPACT_WINDOW}
+    # window, above what these GPT models are configured to use.
+    window = {mid: {"autoCompactWindow": GPT_AUTO_COMPACT_WINDOW[mid]}
               for mid, _, _ in GPT_PICKER}
     return ["--settings", json.dumps({"modelPicker": {"options": options},
                                       "modelSettings": window})]
@@ -482,7 +492,7 @@ def codex_args(orchestrate, add_profile=True):
         # and none of the letter; on V1 the same task arrives in the clear.
         "-c", "features.multi_agent_v2.enabled=false",
     ]
-    if not orchestrate:
+    if not orchestrate or not swe_enabled():
         return args
     for name, description in CODEX_ROLES:
         layer = os.path.join(HERE, "codex", "roles", f"{name}.toml")
@@ -807,7 +817,7 @@ def listening():
 
     A bare TCP connect would also succeed for an unrelated process holding the
     port, and Claude Code would then be pointed at it and fail in confusing ways.
-    Checking that the model list contains a swe-2 entry makes a port conflict
+    Checking that the model list carries a devinx entry makes a port conflict
     deterministic instead of silent. This guards against accidents, not against a
     hostile local process.
     """
@@ -822,8 +832,11 @@ def listening():
         # The exact alias, not a swe-2* prefix: an older gateway sharing this
         # port advertises swe-2-max and friends without knowing `swe-2`, so a
         # prefix match accepted it as devinx and Claude Code was pointed at a
-        # service that would then refuse the model this launcher selects.
-        return any(isinstance(m, dict) and m.get("id") == SWE_ALIAS
+        # service that would then refuse the model this launcher selects. With
+        # Devin access off the catalog has no swe row at all, so every row
+        # devinx serves also says who serves it.
+        return any(isinstance(m, dict) and (m.get("id") == SWE_ALIAS
+                                            or m.get("owned_by") == "devinx")
                    for m in data)
     except Exception:
         return False
@@ -1086,6 +1099,13 @@ def main():
         rest = [a for a in sys.argv[1:] if a != flag]
         return diagnostics.main(flag, rest, sys.modules[__name__])
     use_devin, use_orch, use_codex, passthrough = split_args(sys.argv[1:])
+    if use_orch and not swe_enabled():
+        # The skill and its hooks delegate to swe2-* agents, which are not
+        # offered while Devin access is off; injecting it would advertise an
+        # orchestrator with nobody to orchestrate.
+        sys.stderr.write("devinx: --or needs SWE-2, which is disabled "
+                         "(DEVINX_SWE=1 re-enables it); running without it\n")
+        use_orch = False
 
     client = "codex" if use_codex else "claude"
     binary = shutil.which(client)

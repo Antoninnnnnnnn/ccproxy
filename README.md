@@ -27,6 +27,13 @@ The subagents are real subagents of the client you launched: same tools, same
 harness, same transcripts. Nothing spawns a second process, and the credential
 for each upstream is the one its own client sent — devinx holds none of them.
 
+> **SWE-2 is switched off by default.** Without `DEVINX_SWE=1` the service
+> refuses `swe-*` models (403) and neither model catalog lists them, `--devin`
+> offers only `claude-reviewer` and the `gpt-*` agents, `/model` has no SWE-2
+> entry, `--or` and the Codex SWE roles are skipped, and no Devin credential is
+> ever read. Claude and GPT are unaffected. Set `DEVINX_SWE=1` before the
+> service starts to bring the SWE-2 layer described below back.
+
 ## Read this first
 
 This talks to Cognition's private API, not a public one, and it gets there by
@@ -118,15 +125,16 @@ whatever your Codex config already says; only what it delegates changes.
 
 | flag | effect |
 |---|---|
-| `--devin`, `--d` | route Claude Code through devinx; inject the `swe2-*` agents and `claude-reviewer` |
-| `--codex`, `--cx` | route Codex through devinx; pin the SWE-2 roles |
-| `--or` | add the orchestrator skill; implies the client flag it is used with |
+| `--devin`, `--d` | route Claude Code through devinx; inject `claude-reviewer` and the `gpt-*` agents (plus the `swe2-*` agents with `DEVINX_SWE=1`) |
+| `--codex`, `--cx` | route Codex through devinx; pin the SWE-2 roles (with `DEVINX_SWE=1`) |
+| `--or` | add the orchestrator skill; implies the client flag it is used with (needs `DEVINX_SWE=1`; skipped with a warning otherwise) |
 | `--plain` | cancel `DEVINX_ALWAYS=1` for this one run (an explicit `--devin`/`--or`/`--codex` still wins) |
 | `--` | everything after it passes through verbatim |
 | `--status`, `--doctor`, `--explain` | local diagnostics (see [stability controls](docs/stability.md)); recognised in the first position or after devinx's own flags (`devinx --d --status`), as long as the position is unambiguous |
 
 | variable | effect |
 |---|---|
+| `DEVINX_SWE=1` | switch Devin / SWE-2 access on; off by default. Set it before the service starts: a running service keeps the setting it started with |
 | `DEVINX_ALWAYS=1` | make the SWE-2 layer the default |
 | `DEVINX_ORCHESTRATOR=1` | make the orchestrator the default (implies `DEVINX_ALWAYS`) |
 | `DEVINX_SUBAGENT_MCP=1` | give subagents their MCP tools back |
@@ -421,11 +429,13 @@ effort for Sol and Astra is `xhigh`. A user `--settings`
 wins, and then the rows are not added.
 
 **Compaction copies Codex** (`ModelInfo::auto_compact_token_limit` in
-codex-rs): compact at 90% of the 272k window, 244800 tokens, measured on the
-counts the server reports.
+codex-rs): compact at 90% of each model's window, measured on the counts the
+server reports. Sol uses 500k, compacting at 450000 tokens; Astra and Luna
+keep 272k, compacting at 244800.
 
 - Main session: Claude Code compacts it, with `modelSettings.<model>.
-  autoCompactWindow` at 277800 so that its fixed 33k buffer lands on 244800;
+  autoCompactWindow` at 483000 for Sol and 277800 for Astra/Luna so that its
+  fixed 33k buffer lands on the corresponding 90% threshold;
   behind it the sidecar's Codex-native compaction (`CCP_CODEX_SERVER_COMPACTION`)
   keeps the earlier history in model-native form.
 - Subagents (`x-claude-code-agent-id`), which Claude Code never compacts:
@@ -434,7 +444,25 @@ counts the server reports.
   The trigger is the server's last reported usage plus an estimate of what was
   added since, as in Codex. A summary that takes long keeps the stream alive
   with SSE comments; a context refusal is retried once, compacted harder,
-  instead of ending the agent. `DEVINX_GPT_COMPACT_AT` overrides 244800.
+  instead of ending the agent. `DEVINX_GPT_COMPACT_AT` overrides the subagent
+  compaction threshold for every GPT model.
+
+**Streaming failures.** On the Claude and GPT Messages routes, an HTTP 200
+is not enough: the relay checks SSE errors and requires `message_stop` before
+counting a response as successful. A truncated stream ends with an explicit
+error, not a silent EOF. Logs record `status=stream_error` plus error type,
+code and upstream request ID when available; upstream error text is not logged
+because it can quote private content.
+
+A GPT stream on the default advisor-off path that fails before any content
+block is sent gets one automatic retry, using the same request. The initial
+`message_start` is held until content arrives, so a retry does not duplicate it.
+Once text, thinking or a tool block has been forwarded, the request is **never
+replayed automatically**: retry or send `continue` to resume from the client.
+Reads forward available bytes immediately, including heartbeats on non-chunked
+or compressed streams. Native Codex streams and non-streamed responses remain
+transparent. The optional advisor path reports stream failures but does not
+perform this early-stream retry.
 
 **The advisor on GPT (off by default).** Claude Code declares `advisor` as a server
 tool, which on the Anthropic API the server runs and on a GPT model nobody
@@ -606,6 +634,18 @@ the turn moves to another credential immediately, and only waits when every one
 of them is spent. `DEVINX_API_KEYS` takes a
 comma-separated list instead. Each request logs the account that served it, so
 which credential a limit belongs to is answerable from the log. A login done while the service is running is picked up without a restart, within 30 seconds (`DEVINX_RESCAN`); deleting a credential's file removes it the same way.
+
+**Free accounts are abandoned for model calls.** As soon as the JWT reports
+`pro=false`, that credential is excluded before any model request and is not
+retried. Exclusion and the final model-dispatch check share a per-account lock,
+so a concurrent turn or summary cannot start a request after exclusion. A request
+already in flight is allowed to finish. Discovering a free account does not consume the three payload retries:
+selection continues until an eligible paid account is found. This also applies
+to summaries. A model-access refusal refreshes the plan to detect a downgrade
+hidden behind an older Pro JWT. Only a manual Devin re-login can put an excluded
+credential back up for a fresh plan check; waiting or restarting does not send
+model requests to it. If none is eligible, the proxy reports a Devin service
+error rather than telling Claude Code to run `/login`.
 
 `DEVINX_RATE_WAIT` bounds the total wait (1800s by default) — the client has its
 own timeout, and an answer that never comes is worse than one that says to try

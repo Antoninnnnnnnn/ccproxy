@@ -31,6 +31,8 @@ from unittest import mock
 # Keep the run from writing .pyc files into the project's __pycache__.
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# These tests exercise the SWE-2 route, which is off by default.
+os.environ.setdefault("DEVINX_SWE", "1")
 
 import devinx
 import install

@@ -28,8 +28,10 @@ Definitions:
 """
 
 import argparse
+import hashlib
 import json
 import os
+import pickle
 import re
 import statistics
 import subprocess
@@ -130,7 +132,75 @@ def in_window(at, since, until):
     return True
 
 
-def collect(path, since=None, until=None, undated=False):
+def _model_row():
+    return {"turns": 0, "input": 0, "output": 0}
+
+
+def _account_row():
+    return {"turns": 0, "refusals": 0}
+
+
+# The log only grows, and parsing all of it takes seconds that the dashboard
+# paid again every few seconds. An unbounded pass can therefore resume from a
+# checkpoint: the accumulator plus the byte offset it had reached. It is used
+# only when it provably describes this same log read by this same code (head
+# of the file and the extractor's own source are hashed), and anything odd --
+# a truncated log, an unreadable checkpoint -- falls back to the full parse.
+CKPT_EVERY = 4 * 1024 * 1024      # write a new checkpoint after this much new log
+CKPT_HEAD = 4096
+
+
+def _code_hash():
+    try:
+        with open(__file__, "rb") as handle:
+            return hashlib.sha1(handle.read()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _head_hash(path):
+    try:
+        with open(path, "rb") as handle:
+            return hashlib.sha1(handle.read(CKPT_HEAD)).hexdigest()
+    except OSError:
+        return ""
+
+
+def _ckpt_path(path):
+    return os.path.join(os.path.dirname(os.path.abspath(path)),
+                        "log_stats.ckpt")
+
+
+def _load_ckpt(path, undated):
+    try:
+        with open(_ckpt_path(path), "rb") as handle:
+            ck = pickle.load(handle)
+        size = os.path.getsize(path)
+        if (ck["code"] == _code_hash() and ck["head"] == _head_hash(path)
+                and ck["undated"] == undated and ck["offset"] <= size):
+            return ck
+    except Exception:
+        pass
+    return None
+
+
+def _save_ckpt(path, undated, st, seen_builds, last_acct, last_model, offset):
+    ck = {"code": _code_hash(), "head": _head_hash(path), "undated": undated,
+          "offset": offset, "st": st, "seen_builds": seen_builds,
+          "last_acct": last_acct, "last_model": last_model}
+    tmp = "%s.%d.tmp" % (_ckpt_path(path), os.getpid())
+    try:
+        with open(tmp, "wb") as handle:
+            pickle.dump(ck, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, _ckpt_path(path))
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def collect(path, since=None, until=None, undated=False, ckpt=False):
     st = {
         "lines": 0, "bytes": 0, "restarts": 0, "builds": [],
         "turns_ok": 0, "turns_failed": 0,
@@ -138,8 +208,8 @@ def collect(path, since=None, until=None, undated=False):
         "lat": [], "kb": [], "msgs": [], "calls": [],
         "wire_kb": 0, "wire_raw_kb": 0, "unwired_kb": 0,
         "calls_hist": Counter(), "stops": Counter(),
-        "by_model": defaultdict(lambda: {"turns": 0, "input": 0, "output": 0}),
-        "by_account": defaultdict(lambda: {"turns": 0, "refusals": 0}),
+        "by_model": defaultdict(_model_row),
+        "by_account": defaultdict(_account_row),
         "rl_total": 0, "by_quota": Counter(), "waits": [],
         "switches": 0, "holds": 0, "held_seconds": 0, "budget": 0,
         "bursts": [], "cur_burst": 0,
@@ -171,6 +241,16 @@ def collect(path, since=None, until=None, undated=False):
     seen_builds = set()
     last_acct = None
     last_model = None
+    offset = 0
+    resumed_at = 0
+    resume = (_load_ckpt(path, undated)
+              if ckpt and since is None and until is None else None)
+    if resume:
+        st.clear()
+        st.update(resume["st"])
+        seen_builds = resume["seen_builds"]
+        last_acct, last_model = resume["last_acct"], resume["last_model"]
+        offset = resumed_at = resume["offset"]
 
     def stamp_of(line):
         m = RE_STAMP.match(line)
@@ -191,14 +271,19 @@ def collect(path, since=None, until=None, undated=False):
 
     try:
         st["bytes"] = os.path.getsize(path)
-        fh = open(path, "r", encoding="utf-8", errors="replace")
+        fh = open(path, "rb")
+        fh.seek(offset)
     except OSError:
         fh = None
     if fh is None:
         return st
 
     with fh:
-        for raw in fh:
+        for rawb in fh:
+            if not rawb.endswith(b"\n"):
+                break              # still being written: read it next time
+            offset += len(rawb)
+            raw = rawb.decode("utf-8", "replace")
             st["lines"] += 1
             # The timestamp comes off here, once, rather than being tolerated
             # by every pattern and every startswith below it.
@@ -420,6 +505,9 @@ def collect(path, since=None, until=None, undated=False):
             except Exception:
                 # A malformed line is skipped, never fatal.
                 continue
+    if (ckpt and since is None and until is None
+            and offset - resumed_at >= (CKPT_EVERY if resume else 0)):
+        _save_ckpt(path, undated, st, seen_builds, last_acct, last_model, offset)
     if st["cur_burst"]:
         st["bursts"].append(st["cur_burst"])
     return st
@@ -566,7 +654,7 @@ def main():
     undated = bool(born and since and until is None and since <= born)
     if since is None and until is None:
         undated = True
-    st = collect(LOG_PATH, since, until, undated)
+    st = collect(LOG_PATH, since, until, undated, ckpt=True)
 
     lat = st["lat"]
     lat_total = sum(lat)

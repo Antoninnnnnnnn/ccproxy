@@ -44,12 +44,13 @@ import threading
 import time
 import uuid
 from datetime import datetime
-from runtime_support import CONFIG_FIELDS, PortLock, build_id, hello_proof, service_secret
+from runtime_support import CONFIG_FIELDS, PortLock, build_id, hello_proof, service_secret, swe_enabled
 from http.cookiejar import DefaultCookiePolicy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 import requests
+import urllib3.exceptions
 from urllib3.util.retry import Retry
 try:
     import tomllib
@@ -89,18 +90,17 @@ GPT_MODELS = (
 )
 # The credential Claude Code sends is Anthropic's; it has no business leaving
 # for any other process, local or not.
-# What the ChatGPT backend gives a coding client for GPT-6.x: 272k, of which
-# Codex treats 95% as usable (effective_context_window_percent in its catalog,
-# ~/.codex/models_cache.json) and keeps the rest for output and overhead. The
-# model takes ~1M on the API, but past 272k a request is billed at the
-# long-context rate in full, and coding originators are clamped to 272k.
-GPT_CONTEXT_TOKENS = 272000
-# Codex's own rule, copied (codex-rs/protocol/src/openai_models.rs,
-# ModelInfo::auto_compact_token_limit): compact once the conversation reaches
-# 90% of the raw window, measured with the token counts the server reported,
-# not an estimate. 244800 for GPT-6.x.
-GPT_COMPACT_AT = int(os.environ.get(
-    "DEVINX_GPT_COMPACT_AT", str(GPT_CONTEXT_TOKENS * 9 // 10)))
+# Sol now has a 500k window; Astra and Luna keep their 272k windows.
+GPT_CONTEXT_TOKENS = {
+    "gpt-6.1-sol": 500000,
+    "gpt-6-astra": 272000,
+    "gpt-6-luna": 272000,
+}
+# Codex's own rule (ModelInfo::auto_compact_token_limit): compact at 90% of
+# each model's raw window, measured with server-reported token counts.
+# An explicit override still applies to every GPT subagent.
+GPT_COMPACT_AT = (int(os.environ["DEVINX_GPT_COMPACT_AT"])
+                  if "DEVINX_GPT_COMPACT_AT" in os.environ else None)
 # What the server last reported for each GPT subagent conversation, as
 # key -> (client message count, reported tokens, estimate of what was sent,
 # whether what was sent was compacted). Codex decides on the last reported
@@ -126,6 +126,11 @@ SWE_MODELS = (
     ("swe-2-medium", "SWE-2 Medium"),
 )
 SWE_MODEL_IDS = {item[0] for item in SWE_MODELS}
+
+
+def swe_models():
+    """The SWE-2 rows a catalog may list: none while Devin access is off."""
+    return SWE_MODELS if swe_enabled() else ()
 
 # Claude Code sends the effort slider as output_config.effort. Mapping it onto a
 # tier is only safe for the `swe-2` alias: an explicit swe-2-medium/high/max must
@@ -220,6 +225,15 @@ def repair_tool_ids(body):
 FOREIGN_SIGNATURE_PREFIX = "ccp:"
 
 
+def gpt_context_tokens(model):
+    return GPT_CONTEXT_TOKENS.get(model, 272000)
+
+
+def gpt_compact_at(model):
+    return (GPT_COMPACT_AT if GPT_COMPACT_AT is not None
+            else gpt_context_tokens(model) * 9 // 10)
+
+
 def gpt_raise_low_effort(body):
     """Medium is the floor on GPT: the picker borrows Opus's effort scale,
     which starts at low, and low is not a level these models are run at here.
@@ -245,7 +259,7 @@ def gpt_error(status, text, body):
     if status == 413 and "context" in text.lower():
         return (400, "invalid_request_error",
                 f"prompt is too long: {estimate_tokens(body)} tokens > "
-                f"{GPT_CONTEXT_TOKENS} maximum")
+                f"{gpt_context_tokens(body.get('model'))} maximum")
     return None
 
 
@@ -412,36 +426,61 @@ def gpt_translate_advisor_history(body):
     return {**body, "messages": [m for m, _ in out]}
 
 
-def sse_events(chunks):
-    """(event name, data as a dict or None) for each SSE event in a byte stream.
+def response_chunks(response):
+    """Read available SSE bytes without filling a 64KiB decoded buffer first."""
+    read1 = getattr(response.raw, "read1", None)
+    if not callable(read1):
+        # Older urllib3: identity reads do not need a decoded buffer.
+        yield from response.raw.stream(
+            65536, decode_content=bool(response.headers.get("content-encoding")))
+        return
+    while True:
+        chunk = read1(65536, decode_content=True)
+        if not chunk:
+            return
+        yield chunk
 
-    Comments and anything without a data line come out with data None, so the
-    caller can ignore them without losing its place."""
+
+def sse_frames(chunks):
+    """Complete SSE frames, retaining their bytes, including split CRLFs."""
     buf = b""
-
-    def parse(raw):
-        name, data = None, []
-        for line in raw.decode("utf-8", "replace").split("\n"):
-            if line.startswith("event:"):
-                name = line[6:].strip()
-            elif line.startswith("data:"):
-                data.append(line[5:].lstrip())
-        if not data:
-            return name, None
-        try:
-            parsed = json.loads("\n".join(data))
-        except ValueError:
-            return name, None
-        return (name or (parsed.get("type") if isinstance(parsed, dict)
-                         else None)), parsed if isinstance(parsed, dict) else None
-
+    separator = re.compile(br"\r?\n\r?\n|\r\r")
     for chunk in chunks:
-        buf += chunk.replace(b"\r\n", b"\n")
-        while b"\n\n" in buf:
-            raw, buf = buf.split(b"\n\n", 1)
-            yield parse(raw)
+        buf += chunk
+        while True:
+            match = separator.search(buf)
+            size = match.end() if match else len(buf)
+            if size > MAX_FRAME_BYTES:
+                raise ValueError("SSE frame exceeds the frame limit")
+            if match is None:
+                break
+            frame, buf = buf[:size], buf[size:]
+            yield frame
     if buf.strip():
-        yield parse(buf)
+        yield buf
+
+
+def parse_sse_frame(raw):
+    name, data = None, []
+    for line in raw.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if line.startswith("event:"):
+            name = line[6:].strip()
+        elif line.startswith("data:"):
+            data.append(line[5:].lstrip())
+    if not data:
+        return name, None
+    try:
+        parsed = json.loads("\n".join(data))
+    except ValueError:
+        return name, None
+    return (name or (parsed.get("type") if isinstance(parsed, dict) else None),
+            parsed if isinstance(parsed, dict) else None)
+
+
+def sse_events(chunks):
+    """(event name, dict or None); comments and non-JSON data have no dict."""
+    for frame in sse_frames(chunks):
+        yield parse_sse_frame(frame)
 
 
 def sse_bytes(data):
@@ -1265,17 +1304,18 @@ def _check_plan(acct, jwt):
     its plan is never re-read. It comes back only when it is logged in again,
     which rewrites its credentials file: the rescan sees that and clears it.
     """
-    claims = _jwt_claims(jwt)
-    tier = claims.get("teams_tier") or "?"
-    acct["tier"] = tier
-    if "pro" in claims:
-        acct["pro"] = bool(claims["pro"])
-    if claims.get("pro") is False and not acct.get("excluded"):
-        acct["excluded"] = f"plan gratuit ({tier})"
-        acct["excluded_mtime"] = _mtime(acct.get("path"))
-        print(f"devinx: credential {acct['name']} is on a free plan "
-              f"(pro=false, {tier}); excluded until it is logged in again",
-              flush=True)
+    with _plan_lock_for(acct):
+        claims = _jwt_claims(jwt)
+        tier = claims.get("teams_tier") or "?"
+        acct["tier"] = tier
+        if "pro" in claims:
+            acct["pro"] = bool(claims["pro"])
+        if claims.get("pro") is False and not acct.get("excluded"):
+            acct["excluded"] = f"plan gratuit ({tier})"
+            acct["excluded_mtime"] = _mtime(acct.get("path"))
+            print(f"devinx: credential {acct['name']} is on a free plan "
+                  f"(pro=false, {tier}); excluded until it is logged in again",
+                  flush=True)
 
 
 def _first_usable():
@@ -1646,6 +1686,16 @@ def paced(acct):
     return sem
 
 
+# Plan exclusion and model dispatch share a separate per-account lock. Never
+# hold the fleet lock over network I/O, or a slow account blocks every Pro.
+_plan_locks = {}
+
+
+def _plan_lock_for(acct):
+    with _acct_lock:
+        return _plan_locks.setdefault(id(acct), threading.Lock())
+
+
 # One lock per credential, not one for the process: the lock is held across
 # a network call of up to 30s, and a slow auth endpoint for one account used
 # to hold up the turns of every other account behind it.
@@ -1721,9 +1771,21 @@ def _jwt_or_reload(acct, force=False):
     on. Refused once, the credentials are re-read and the call tried again;
     refused twice, it is an authentication_error.
     """
+    def excluded():
+        return None, None, (
+            f"credential_excluded: Devin credential {acct['name']} is excluded "
+            f"({acct.get('excluded', 'plan unavailable')}); use a paid Devin account, "
+            "not Claude /login")
+
     for attempt in range(2):
+        if acct.get("excluded"):
+            return excluded()
         try:
             jwt, base = get_jwt(acct, force=force or attempt > 0)
+            # Fetching the first JWT can reveal pro=false. Never send a model
+            # request on it, and do not spend a classifier retry discovering it.
+            if acct.get("excluded"):
+                return excluded()
             return jwt, base, None
         except requests.HTTPError as e:
             if not _auth_refused(e):
@@ -2254,13 +2316,23 @@ def chat_stream(req, acct=None, purpose="turn"):
             # throwaway Session, so every turn paid a fresh TLS handshake to
             # Cognition and ignored SESSION's trust_env=False.
             _request_phase("summarizing" if purpose == "summary" else "connecting")
-            r = SESSION.post((base or COGNITION_UPSTREAM) + CHAT_PATH, data=frame,
-                             headers={"content-type": "application/connect+proto",
-                                      "connect-protocol-version": "1",
-                                      "connect-content-encoding": "gzip",
-                                      "connect-accept-encoding": "gzip",
-                                      "user-agent": "connect-go/1.18.1 (go1.26.3)"},
-                             timeout=600, stream=True)
+            # Serialize the final eligibility check and dispatch with plan
+            # exclusion. An in-flight request may finish, but none starts
+            # after another thread has confirmed this account is free.
+            with _plan_lock_for(acct):
+                excluded = acct.get("excluded")
+                if not excluded:
+                    r = SESSION.post((base or COGNITION_UPSTREAM) + CHAT_PATH, data=frame,
+                                     headers={"content-type": "application/connect+proto",
+                                              "connect-protocol-version": "1",
+                                              "connect-content-encoding": "gzip",
+                                              "connect-accept-encoding": "gzip",
+                                              "user-agent": "connect-go/1.18.1 (go1.26.3)"},
+                                     timeout=600, stream=True)
+            if excluded:
+                yield None, (f"credential_excluded: Devin credential {acct['name']} "
+                             "is excluded from model calls")
+                return
             if r.status_code == 200:
                 break
             status, detail = r.status_code, r.text[:400]
@@ -2325,6 +2397,17 @@ def chat_stream(req, acct=None, purpose="turn"):
                         message = err.get("message", "(no message)")
                         print(f"upstream trailer error on {acct['name']}: "
                               f"{code}: {message}", flush=True)
+                        if (code == "permission_denied" and
+                                "model is no longer available for your account"
+                                in message.lower()):
+                            # A cached Pro JWT can outlive a downgrade. Refresh
+                            # the plan before any model retry; a failed refresh
+                            # must not let that stale JWT be reused either.
+                            acct["exp"] = 0.0
+                            _, _, plan_error = _jwt_or_reload(acct, force=True)
+                            if plan_error:
+                                yield None, plan_error
+                                return
                         yield None, f"{code}: {message}"
                     continue
                 raw = _frame_payload(payload, flag & 1)
@@ -2588,6 +2671,11 @@ def _summarise_once(messages, model, system, previous, turn):
                       f"({len(fallback)} chars)", flush=True)
                 return fallback
             return None
+        if acct.get("excluded"):
+            print(f"summary: credential {acct['name']} excluded; selecting "
+                  "another paid account", flush=True)
+            acct = None
+            continue
         if "resource_exhausted" in err:
             block_account(acct, reset_delay(err))
             print(f"summary: rate limited on {acct['name']}", flush=True)
@@ -2963,6 +3051,9 @@ def _tail_start(messages, budget):
 # What an on_error hook returns to have the relay hand the turn back, nothing
 # sent, for its caller to try once more.
 RETRY = object()
+# An upstream generation failed before any message content reached the client.
+# Unlike RETRY (a context refusal), this retries the same body only once.
+RETRY_STREAM = object()
 
 
 class UsageSniffer:
@@ -2990,11 +3081,19 @@ class UsageSniffer:
                 event = json.loads(line[5:])
             except ValueError:
                 continue
-            usage = ((event.get("message") or {}).get("usage")
-                     or event.get("usage") or {})
-            for field in self.FIELDS:
-                if isinstance(usage.get(field), int) and usage[field] > 0:
-                    self.usage[field] = usage[field]
+            self.observe(event)
+
+    def observe(self, event):
+        if not isinstance(event, dict):
+            return
+        message = event.get("message")
+        usage = ((message.get("usage") if isinstance(message, dict) else None)
+                 or event.get("usage") or {})
+        if not isinstance(usage, dict):
+            return
+        for field in self.FIELDS:
+            if isinstance(usage.get(field), int) and usage[field] > 0:
+                self.usage[field] = usage[field]
 
     @property
     def total(self):
@@ -3241,6 +3340,8 @@ _ERROR_TYPES = {
     "resource_exhausted": ("rate_limit_error", 429),
     "invalid_argument": ("invalid_request_error", 400),
     "permission_denied": ("permission_error", 403),
+    "credential_excluded": ("api_error", 503),
+
     "unauthenticated": ("authentication_error", 401),
     "deadline_exceeded": ("timeout_error", 408),
     "unavailable": ("overloaded_error", 503),
@@ -3660,6 +3761,17 @@ def _run_swe(body, out):
         # Before every attempt, first included: compaction may have held the
         # turn for minutes, and every retry below is one more request.
         turn.check()
+        if acct is not None and acct.get("excluded"):
+            acct = None
+        if acct is None:
+            acct, _ = claim_account()
+            if acct is None:
+                try:
+                    acct = _first_usable()
+                except RuntimeError:
+                    return _swe_early_error(
+                        out, "credential_excluded: no eligible paid Devin credential; "
+                        "check Devin subscriptions, not Claude /login")
         try:
             _request_phase("preparing")
             req, model = build_request(body, TOOL_DESC_CAPS[attempt])
@@ -3677,12 +3789,6 @@ def _run_swe(body, out):
         usage, stop, err, emitted = {}, 0, None, False
         latency = 0.0
 
-        if acct is not None and acct.get("excluded"):
-            acct = None          # excluded mid-turn: never retried on it
-        if acct is None:
-            acct, _ = claim_account()
-            if acct is None:
-                acct = _first_usable()
         try:
           _request_phase("waiting_capacity")
           with _paced_for(acct, turn):
@@ -3758,6 +3864,13 @@ def _run_swe(body, out):
             # dropped upstream — ConnectionResetError is on the transient list —
             # so without this a vanished client was retried as a network fault.
             turn.check()
+        if err and not emitted and acct.get("excluded"):
+            # A first JWT can reveal a free account. Skipping it is account
+            # selection, not one of the three payload/classifier attempts.
+            print(f"upstream credential {acct['name']} excluded; selecting "
+                  "another paid account", flush=True)
+            acct = None
+            continue
         if (err and not emitted and retries < NETWORK_RETRIES
                 and any(t in err for t in _TRANSIENT)):
             retries += 1
@@ -4480,7 +4593,7 @@ class Handler(BaseHTTPRequestHandler):
         to the SWE-2 rows alone rather than failing the request.
         """
         rows = [self.catalog_row(mid, name, i)
-                for i, (mid, name) in enumerate(SWE_MODELS)]
+                for i, (mid, name) in enumerate(swe_models())]
         query = urlsplit(self.path).query
         # Only a request that is identifiably Codex goes to chatgpt.com. Claude
         # Code's gateway discovery asks this same path (/v1/models?limit=1000)
@@ -4740,13 +4853,13 @@ class Handler(BaseHTTPRequestHandler):
                    "context_window": SWE_CONTEXT_TOKENS,
                    "runtime": {"max_input_tokens": SWE_CONTEXT_TOKENS,
                                "max_output_tokens": 128000}}
-                  for mid, name in SWE_MODELS]
+                  for mid, name in swe_models()]
         models += [{"type": "model", "id": mid, "display_name": name,
                     "created_at": "2026-01-01T00:00:00Z",
                     "object": "model", "created": 1767225600,
                     "owned_by": "devinx",
-                    "context_window": GPT_CONTEXT_TOKENS,
-                    "runtime": {"max_input_tokens": GPT_CONTEXT_TOKENS,
+                    "context_window": gpt_context_tokens(mid),
+                    "runtime": {"max_input_tokens": gpt_context_tokens(mid),
                                 "max_output_tokens": 128000}}
                    for mid, name in GPT_MODELS]
         # `data` is what Claude Code reads, `models` what Codex reads; serving
@@ -4822,6 +4935,15 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         _request_phase("accepted", model=model)
+        if model in SWE_MODEL_IDS and not swe_enabled():
+            # Refused before anything else reads a Devin credential: with the
+            # route unreachable, nothing here can spend a SWE-2 quota. One
+            # branch covers messages, count_tokens and /v1/responses.
+            self.send_error_json(
+                403, "permission_error",
+                "SWE-2 access is disabled on this devinx (DEVINX_SWE=1 "
+                "re-enables it); use a claude-* or gpt-* model")
+            return
         if model in SWE_MODEL_IDS and self.browser_origin():
             self.send_error_json(
                 403, "permission_error",
@@ -5061,18 +5183,19 @@ class Handler(BaseHTTPRequestHandler):
                 {"messages": messages[reported[0]:]})
         elif reported and reported[2]:
             measured = int(estimated * reported[1] / reported[2])
+        compact_at = gpt_compact_at(body.get("model"))
         if force:
             # The server refused this size: whatever the counts said, they
             # were short. Cut to well under the limit by the estimate itself.
-            measured = max(measured, int(GPT_COMPACT_AT * 1.25))
-        if measured < GPT_COMPACT_AT or len(messages) < 4:
+            measured = max(measured, int(compact_at * 1.25))
+        if measured < compact_at or len(messages) < 4:
             return body, committed
         # compact_body sizes by estimate. Scaling the limit by how far the
         # estimate is from the server's count makes it cut where the server's
         # count would, in both directions.
-        limit = max(1000, int(GPT_COMPACT_AT * estimated / max(measured, 1)))
+        limit = max(1000, int(compact_at * estimated / max(measured, 1)))
         print(f"compaction(gpt): {measured} tokens measured ({estimated} "
-              f"estimated), over {GPT_COMPACT_AT}", flush=True)
+              f"estimated), over {compact_at}", flush=True)
         turn = Turn(conn=getattr(self, "connection", None))
         profile = CompactProfile(limit, once=_summarise_once_gpt,
                                  model=body.get("model"), namespace="gpt\0")
@@ -5209,7 +5332,7 @@ class Handler(BaseHTTPRequestHandler):
                 sniff = UsageSniffer()
 
                 def chunks(resp=response, sniff=sniff):
-                    for chunk in resp.raw.stream(65536, decode_content=True):
+                    for chunk in response_chunks(resp):
                         sniff.feed(chunk)
                         yield chunk
 
@@ -5352,7 +5475,8 @@ class Handler(BaseHTTPRequestHandler):
             outcome = "client_disconnected"
         except (BrokenPipeError, ConnectionResetError):
             outcome = "client_disconnected"
-        except requests.RequestException as error:
+        except (requests.RequestException, urllib3.exceptions.HTTPError,
+                ValueError) as error:
             outcome = type(error).__name__
             fail(502, "api_error", "Upstream unavailable")
         finally:
@@ -5395,8 +5519,93 @@ class Handler(BaseHTTPRequestHandler):
               flush=True)
         return advice, ok
 
+    def relay_events(self, response, model, label, on_usage=None, retry=False,
+                     tap=None):
+        """Relay Messages SSE, not just its HTTP status.
+
+        Hold message_start until the first content block: a failed generation
+        can then be retried without giving the client a second message_start.
+        Once any content (including thinking or a tool call) is forwarded,
+        replay is forbidden. A partial answer is never declared complete.
+        """
+        prefix, exposed = b"", False
+        sniff = UsageSniffer()
+        error = None
+        transport = None
+        try:
+            for frame in sse_frames(response_chunks(response)):
+                if tap is not None:
+                    tap.write(frame)
+                name, data = parse_sse_frame(frame)
+                sniff.observe(data)
+                kind = (data or {}).get("type") or name
+                if kind == "error":
+                    error = (data or {}).get("error")
+                    if not isinstance(error, dict):
+                        error = {"type": "api_error",
+                                 "message": "Upstream sent an invalid error event"}
+                    break
+                if data is not None and (not isinstance(kind, str)
+                                         or data.get("type") != kind
+                                         or (name is not None and name != kind)):
+                    error = {"type": "api_error",
+                             "message": "Upstream sent an inconsistent stream event"}
+                    break
+                if data is None and any(line.startswith(b"data:")
+                                        for line in frame.splitlines()):
+                    error = {"type": "api_error",
+                             "message": "Upstream sent an invalid stream event"}
+                    break
+                if kind == "message_start" and data is not None:
+                    if prefix or exposed:
+                        error = {"type": "api_error",
+                                 "message": "Upstream restarted a message mid-stream"}
+                        break
+                    prefix = frame
+                    continue
+                if data is not None and kind != "ping":
+                    if prefix:
+                        self.wfile.write(prefix)
+                        prefix = b""
+                    exposed = True
+                self.wfile.write(frame)
+                self.wfile.flush()
+                if kind == "message_stop" and data is not None:
+                    if on_usage is not None and sniff.total:
+                        on_usage(sniff.total)
+                    return "200"
+        except (requests.RequestException, urllib3.exceptions.HTTPError,
+                ValueError) as exc:
+            transport = type(exc).__name__
+        if error is None:
+            error = {"type": "overloaded_error",
+                     "message": "Upstream connection ended before message_stop. "
+                                "Retry or send 'continue' to resume the partial response."}
+        kind = error.get("type")
+        if not isinstance(kind, str) or not kind:
+            kind = "api_error"
+        # Log protocol metadata, never arbitrary upstream messages (which can
+        # quote prompts or credentials). Keep request IDs to trace the cause.
+        fields = {"route": label, "model": model, "error_type": kind,
+                  "error_code": error.get("code"), "transport": transport,
+                  "request_id": (response.headers.get("request-id")
+                                 or response.headers.get("x-request-id"))}
+        detail = " ".join(f"{key}={re.sub(r'[^a-zA-Z0-9_.-]', '_', str(value))[:128]}"
+                          for key, value in fields.items() if value is not None)
+        can_retry = (retry and not exposed and kind in
+                     {"api_error", "server_error", "overloaded_error",
+                      "internal_server_error"})
+        print(f"relay stream: {detail} partial={exposed} retry={int(can_retry)}",
+              flush=True)
+        if can_retry:
+            return RETRY_STREAM
+        message = error.get("message")
+        self.send_sse_error(kind, message if isinstance(message, str) and message
+                            else "Upstream stream failed")
+        return "stream_error"
+
     def relay(self, raw, model, url, label, strip=(), on_error=None,
-              committed=False, on_usage=None):
+              committed=False, on_usage=None, stream_attempt=0):
         """Transparent relay. Headers pass through untouched, including the
         caller's credential unless `strip` names it; this process adds nothing
         of its own. `on_error(status, text)` may replace an upstream error
@@ -5404,12 +5613,19 @@ class Handler(BaseHTTPRequestHandler):
         SSE stream were already started: only the body follows, and an error
         becomes an SSE error event."""
         response = None
+        tap = None
         response_started = False
         relay_started = time.time()
         try:
             headers = {name: value for name, value in self.headers.items()
                        if name.lower() not in REQUEST_EXCLUDED
                        and name.lower() not in strip}
+            if label in {"claude", "gpt"}:
+                # Keep SSE inspectable, so an error inside HTTP 200 is not
+                # counted as success. Decode anyway if upstream compresses it.
+                headers = {n: v for n, v in headers.items()
+                           if n.lower() != "accept-encoding"}
+                headers["accept-encoding"] = "identity"
             _request_phase("connecting")
             response = SESSION.request(self.command, url, data=raw,
                                        headers=headers, stream=True,
@@ -5426,6 +5642,17 @@ class Handler(BaseHTTPRequestHandler):
                 text = ("" if response.headers.get("content-encoding")
                         else consumed[:65536].decode("utf-8", "replace"))
                 replaced = on_error(response.status_code, text)
+                if replaced is RETRY and stream_attempt:
+                    # Headers were committed by the first stream. Returning
+                    # RETRY to serve_gpt would lose that fact and write a
+                    # second HTTP response during its compaction retry.
+                    try:
+                        retry_body = json.loads(raw)
+                    except (ValueError, TypeError):
+                        retry_body = None
+                    replaced = (gpt_error(response.status_code, text, retry_body)
+                                if isinstance(retry_body, dict) else None)
+                    replaced = replaced or (502, "api_error", "Upstream retry failed")
                 if replaced is RETRY:
                     print(f"route={label} model={model} "
                           f"status={response.status_code} -> retrying",
@@ -5452,11 +5679,16 @@ class Handler(BaseHTTPRequestHandler):
                 print(f"route={label} model={model} status={response.status_code} "
                       f"(sse) in {time.time() - relay_started:.1f}s", flush=True)
                 return
+            streaming = (self.command != "HEAD" and label in {"claude", "gpt"}
+                         and response.status_code == 200
+                         and "text/event-stream" in response.headers.get("content-type", ""))
             response_started = True
             if not committed:
                 self.send_response(response.status_code)
                 for name, value in response.headers.items():
-                    if name.lower() not in RESPONSE_EXCLUDED:
+                    if (name.lower() not in RESPONSE_EXCLUDED
+                            and not (streaming and name.lower() in
+                                     {"content-encoding", "content-length"})):
                         self.send_header(name, value)
                 self.send_header("connection", "close")
                 self.end_headers()
@@ -5470,7 +5702,19 @@ class Handler(BaseHTTPRequestHandler):
                                f"{time.time_ns()}.sse", "wb")
                 except OSError:
                     tap = None
-            if consumed is not None:
+            outcome = str(response.status_code)
+            if streaming:
+                outcome = self.relay_events(
+                    response, model, label, on_usage=on_usage,
+                    retry=label == "gpt" and stream_attempt == 0, tap=tap)
+                if outcome is RETRY_STREAM:
+                    response.close()
+                    if tap is not None:
+                        tap.close()
+                    return self.relay(raw, model, url, label, strip=strip,
+                                      on_error=on_error, committed=True,
+                                      on_usage=on_usage, stream_attempt=1)
+            elif consumed is not None:
                 self.wfile.write(consumed)
                 self.wfile.flush()
             elif self.command != "HEAD":
@@ -5490,25 +5734,32 @@ class Handler(BaseHTTPRequestHandler):
                         self.wfile.flush()
             if tap is not None:
                 tap.close()
-            if (on_usage is not None and self.command != "HEAD"
+            if (not streaming and on_usage is not None and self.command != "HEAD"
                     and consumed is None and sniff is not None and sniff.total):
                 on_usage(sniff.total)
-            print(f"route={label} model={model} status={response.status_code} "
+            print(f"route={label} model={model} status={outcome} "
                   f"in {time.time() - relay_started:.1f}s",
                   flush=True)
         except (BrokenPipeError, ConnectionResetError):
             print(f"route={label} model={model} status=client_disconnected "
                   f"in {time.time() - relay_started:.1f}s",
                   flush=True)
-        except requests.RequestException as error:
+        except (requests.RequestException, urllib3.exceptions.HTTPError) as error:
             print(f"route={label} model={model} status={type(error).__name__} "
                   f"in {time.time() - relay_started:.1f}s",
                   flush=True)
-            if committed:
+            if (response_started and response is not None and not committed
+                    and "text/event-stream" in response.headers.get("content-type", "")):
+                # Headers already went out: all that is left is the event the
+                # real API sends when it drops a stream, which clients retry.
+                self.send_sse_error("overloaded_error", "Upstream connection dropped")
+            elif committed:
                 self.send_sse_error("api_error", "Upstream unavailable")
             elif not response_started:
                 self.send_error_json(502, "api_error", "Upstream unavailable")
         finally:
+            if tap is not None:
+                tap.close()
             if response is not None:
                 response.close()
             self.close_connection = True

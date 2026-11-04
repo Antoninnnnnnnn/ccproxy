@@ -14,6 +14,8 @@ from unittest import mock
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# These tests exercise the SWE-2 route, which is off by default.
+os.environ.setdefault("DEVINX_SWE", "1")
 
 import install
 import launcher
