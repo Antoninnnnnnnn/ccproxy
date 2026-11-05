@@ -77,5 +77,32 @@ class RenameTests(unittest.TestCase):
         self.assertEqual(env['CCPROXY_PORT'], '8316')   # the new name wins
 
 
+
+class LegacyServiceTests(unittest.TestCase):
+    """A devinx service still running must be judged stale and replaced, not
+    taken for a stranger: both of these were broken by the rename itself."""
+
+    def test_the_identity_proof_is_unchanged(self):
+        import hmac, hashlib
+        expected = hmac.new(b's', b'devinx-hello\0' + b'ab12',
+                            hashlib.sha256).hexdigest()
+        self.assertEqual(runtime_support.hello_proof('s', 'ab12'), expected)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), '/proc cmdline')
+    def test_a_devinx_process_may_be_stopped(self):
+        import launcher
+        data = b'/venv/bin/python\0/home/u/devinx/devinx.py\0'
+        with mock.patch('builtins.open', mock.mock_open(read_data=data)):
+            self.assertTrue(launcher._pid_runs_ccproxy(1234))
+        with mock.patch('builtins.open', mock.mock_open(read_data=b'/usr/bin/vim\0')):
+            self.assertFalse(launcher._pid_runs_ccproxy(1234))
+
+    def test_conversation_ids_keep_their_seed(self):
+        # SWE-2 cascade and message ids derive from these: a new seed would
+        # start every conversation in flight over upstream.
+        source = (ROOT / 'ccproxy.py').read_text(encoding='utf-8')
+        for seed in ('"devinx-msg\\0"', '"devinx\\0" + conv_seed', '"devinx-traj\\0"'):
+            self.assertIn(seed, source)
+
 if __name__ == '__main__':
     unittest.main()

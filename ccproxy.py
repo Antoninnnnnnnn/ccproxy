@@ -2050,7 +2050,7 @@ def _msgid(kind, payload):
     for the whole remaining conversation.
     """
     blob = json.dumps(payload, sort_keys=True, default=str)
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, "ccproxy-msg\0" + kind + "\0" + blob))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, "devinx-msg\0" + kind + "\0" + blob))
 
 
 # Cognition's input classifier rejects some long tool descriptions outright —
@@ -2112,7 +2112,7 @@ def build_request(body, tool_desc_cap=None):
     regrouping needed.
     """
     conv_seed = _conv_key(body)
-    cascade_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "ccproxy\0" + conv_seed))
+    cascade_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "devinx\0" + conv_seed))
     prompts = []
 
     seen_ids = {}
@@ -2294,7 +2294,7 @@ def build_request(body, tool_desc_cap=None):
     # then n_assistant_turns+1.
     n_asst = sum(1 for p in prompts if p.get("source") == SRC_SYSTEM)
     req.trajectory_reference.trajectory_id = str(
-        uuid.uuid5(uuid.NAMESPACE_URL, "ccproxy-traj\0" + conv_seed))
+        uuid.uuid5(uuid.NAMESPACE_URL, "devinx-traj\0" + conv_seed))
     req.trajectory_reference.trajectory_type = 4
     if any(p.get("source") == SRC_TOOL for p in prompts):
         req.trajectory_reference.step_type = 0

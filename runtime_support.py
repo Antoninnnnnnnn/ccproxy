@@ -347,5 +347,7 @@ def service_secret(directory):
 
 def hello_proof(secret, nonce):
     import hmac
-    return hmac.new(secret.encode(), b'ccproxy-hello\0' + nonce.encode(),
+    # 'devinx-hello' is a protocol constant, kept through the rename: a
+    # service from before it must still prove itself to be replaced.
+    return hmac.new(secret.encode(), b'devinx-hello\0' + nonce.encode(),
                     hashlib.sha256).hexdigest()

@@ -810,9 +810,12 @@ def _pid_runs_ccproxy(pid):
         if sys.platform == "darwin":
             r = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
                                capture_output=True, text=True, timeout=3)
-            return r.returncode == 0 and "ccproxy.py" in r.stdout
+            return r.returncode == 0 and ("ccproxy.py" in r.stdout
+                                          or "devinx.py" in r.stdout)
         with open(f"/proc/{pid}/cmdline", "rb") as fh:
-            return b"ccproxy.py" in fh.read()
+            # devinx.py: this service under its former name.
+            cmdline = fh.read()
+            return b"ccproxy.py" in cmdline or b"devinx.py" in cmdline
     except (OSError, subprocess.SubprocessError, ValueError):
         return False
 
