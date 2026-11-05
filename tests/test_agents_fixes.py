@@ -15,7 +15,7 @@ from unittest import mock
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # These tests exercise the SWE-2 route, which is off by default.
-os.environ.setdefault("DEVINX_SWE", "1")
+os.environ.setdefault("CCPROXY_SWE", "1")
 
 import install
 import launcher
@@ -99,7 +99,7 @@ class GlobalAgentsMcpDenyTests(unittest.TestCase):
     def test_an_agent_with_no_disallowed_tools_gets_the_deny_added(self):
         text = AGENT_TEMPLATE.format(name="worker", extra="", body="Body.")
         with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("DEVINX_SUBAGENT_MCP", None)
+            os.environ.pop("CCPROXY_SUBAGENT_MCP", None)
             patched = install._with_mcp_deny(text)
         self.assertIn("disallowedTools: mcp__*", patched)
 
@@ -107,13 +107,13 @@ class GlobalAgentsMcpDenyTests(unittest.TestCase):
         text = AGENT_TEMPLATE.format(
             name="explorer", extra="disallowedTools: Edit, Write\n", body="Body.")
         with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("DEVINX_SUBAGENT_MCP", None)
+            os.environ.pop("CCPROXY_SUBAGENT_MCP", None)
             patched = install._with_mcp_deny(text)
         self.assertIn("disallowedTools: Edit, Write, mcp__*", patched)
 
     def test_subagent_mcp_opt_out_leaves_the_file_untouched(self):
         text = AGENT_TEMPLATE.format(name="worker", extra="", body="Body.")
-        with mock.patch.dict(os.environ, {"DEVINX_SUBAGENT_MCP": "1"}):
+        with mock.patch.dict(os.environ, {"CCPROXY_SUBAGENT_MCP": "1"}):
             patched = install._with_mcp_deny(text)
         self.assertEqual(patched, text)
 
@@ -127,7 +127,7 @@ class GlobalAgentsMcpDenyTests(unittest.TestCase):
             with mock.patch.object(install, "HERE", here), \
                  mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": config}, clear=False), \
                  contextlib.redirect_stdout(io.StringIO()):
-                os.environ.pop("DEVINX_SUBAGENT_MCP", None)
+                os.environ.pop("CCPROXY_SUBAGENT_MCP", None)
                 install.install_agents(force=True)
             with open(os.path.join(config, "agents", "worker.md")) as fh:
                 installed = fh.read()
@@ -170,7 +170,7 @@ class StaleCodexCacheTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as here, \
              tempfile.TemporaryDirectory() as codex_home:
             self._package(here, "1.1.0")
-            cache_dir = os.path.join(codex_home, "plugins", "cache", "devinx",
+            cache_dir = os.path.join(codex_home, "plugins", "cache", "ccproxy",
                                      "swe-orchestrator", "1.1.0")
             os.makedirs(cache_dir)
             with open(os.path.join(cache_dir, "SKILL.md"), "w") as fh:
@@ -186,7 +186,7 @@ class StaleCodexCacheTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as here, \
              tempfile.TemporaryDirectory() as codex_home:
             self._package(here, "1.1.0")
-            cache_dir = os.path.join(codex_home, "plugins", "cache", "devinx",
+            cache_dir = os.path.join(codex_home, "plugins", "cache", "ccproxy",
                                      "swe-orchestrator", "1.1.0")
             os.makedirs(cache_dir)
             with open(os.path.join(cache_dir, "SKILL.md"), "w") as fh:
@@ -205,12 +205,12 @@ class StaleCodexCacheTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as here, \
              tempfile.TemporaryDirectory() as codex_home:
             self._package(here, "1.1.0")
-            fresh = os.path.join(codex_home, "plugins", "cache", "devinx",
+            fresh = os.path.join(codex_home, "plugins", "cache", "ccproxy",
                                  "swe-orchestrator", "1.1.0")
             os.makedirs(fresh)
             with open(os.path.join(fresh, "SKILL.md"), "w") as fh:
                 fh.write("current content")
-            stale = os.path.join(codex_home, "plugins", "cache", "devinx",
+            stale = os.path.join(codex_home, "plugins", "cache", "ccproxy",
                                  "swe-orchestrator", "1.0.0")
             os.makedirs(stale)
             with open(os.path.join(stale, "SKILL.md"), "w") as fh:
@@ -254,7 +254,7 @@ class RefreshStaleCodexCacheTests(unittest.TestCase):
             _json.dump({"name": "swe-orchestrator", "version": version}, fh)
 
     def _cache_dir(self, codex_home, version):
-        return os.path.join(codex_home, "plugins", "cache", "devinx",
+        return os.path.join(codex_home, "plugins", "cache", "ccproxy",
                             "swe-orchestrator", version)
 
     def test_a_stale_version_is_moved_aside_then_dropped_after_success(self):

@@ -7,19 +7,19 @@ No production account or live inference call is required by the test suite.
 ## Local diagnostics
 
 ```sh
-devinx --status
-devinx --doctor --json
-devinx --explain --cx --or
+ccproxy --status
+ccproxy --doctor --json
+ccproxy --explain --cx --or
 ```
 
 These flags are recognised in the first launcher argument, and also after
-devinx's own flags (`devinx --d --status`) as long as they come before `--`
+ccproxy's own flags (`ccproxy --d --status`) as long as they come before `--`
 and before any client subcommand or prompt — an ambiguous position (anything
-that is not one of devinx's own flags precedes it) is left to the client
-instead. A plain `devinx`, client subcommands and arguments after `--` keep
+that is not one of ccproxy's own flags precedes it) is left to the client
+instead. A plain `ccproxy`, client subcommands and arguments after `--` keep
 their existing meaning. Diagnostics never start a service, read credentials or
 make an inference call. `--status` and `--doctor` query the local `/api/hello`
-endpoint and return 0 for a running devinx service, 1 otherwise. `--doctor`
+endpoint and return 0 for a running ccproxy service, 1 otherwise. `--doctor`
 adds dependency/client presence and descriptor counts; this is a local check,
 **not** proof that an upstream account is working. `--explain` shows the
 selected client and injected agents, not the user's prompt, and returns 0 once
@@ -31,14 +31,14 @@ The service reports an explicit allowlist of numeric/boolean runtime settings.
 Diagnostics compare explicitly requested environment settings with the daemon's
 actual values. Changing a variable in a new terminal does not reconfigure an
 already-running process. Runtime fingerprints now include shared runtime code,
-descriptors and dashboard assets, not just `devinx.py`.
+descriptors and dashboard assets, not just `ccproxy.py`.
 
 The dashboard adds a live request table (phase and age). It is independent of
 the historical time-range filter. These are **request** identities, not agent
 identities. No prompt or tool payload is collected for this table. Existing
 charts and the separate dashboard listener remain in place. The compaction
 shape log no longer prints snippets of conversation content. Other diagnostic
-logs are not certified secret-free: do not share raw logs or `DEVINX_DUMP`
+logs are not certified secret-free: do not share raw logs or `CCPROXY_DUMP`
 output as a substitute for the allowlisted diagnostics.
 
 ## Errors, streaming and lifecycle
@@ -60,15 +60,15 @@ output as a substitute for the allowlisted diagnostics.
   accepted POST work. Repeated signals do not cut short that work. The configured
   drain deadline can still terminate long-running requests when it expires.
 - Concurrent launchers with the same data directory and port use an OS file
-  lock. A foreign service is never started over or killed. An older busy devinx
+  lock. A foreign service is never started over or killed. An older busy ccproxy
   is replaced only if it reports a drain at least as long as its wait budget
   (the default from now on), so its turns finish in the old process while the
   new one takes new connections; older builds are still left running, with
   the existing warning.
 - One service per port: the service holds a per-user port lock (under
-  `/run/user/<uid>/devinx`, or `~/.cache/devinx/run`) for as long as it
+  `/run/user/<uid>/ccproxy`, or `~/.cache/ccproxy/run`) for as long as it
   listens, whatever its data directory, and no longer sets `SO_REUSEPORT`; a
-  second devinx on the same port waits 15s for the lock and then exits. The
+  second ccproxy on the same port waits 15s for the lock and then exits. The
   lock is released as soon as the listener closes, so a successor can start
   while the old process drains. On Windows the port is bound exclusively.
 - The launcher checks who it is talking to: on Linux the listening socket
@@ -82,24 +82,24 @@ Settings are read when the **service starts**:
 
 | Variable | Default | Meaning |
 |---|---:|---|
-| `DEVINX_MAX_INFLIGHT` | 64 | Maximum concurrent requests other than SWE-2 turns (claude-*/gpt-* relays, count_tokens, requests still being read); 0 disables the cap. Excess receives 503 with Retry-After. |
-| `DEVINX_HTTP_READ_TIMEOUT` | 30 | Socket inactivity limit in seconds while receiving HTTP headers/body. |
-| `DEVINX_CLIENT_WRITE_TIMEOUT` | 120 | Socket inactivity limit in seconds while writing to the client. |
-| `DEVINX_MAX_FRAME` | 16777216 | Maximum encoded upstream Connect frame bytes. |
-| `DEVINX_MAX_INFLATED_FRAME` | 67108864 | Maximum decoded frame bytes, including concatenated gzip streams. |
-| `DEVINX_RELAY_READ_TIMEOUT` | 0 | Relay read inactivity limit in seconds; 0 keeps the previous unlimited read wait. |
-| `DEVINX_COMPACT_STRICT` | 0 | Set to 1 for the strict compaction policy below. |
-| `DEVINX_MAX_BODY` | 134217728 (128 MiB) | Maximum accepted request body size in bytes. |
-| `DEVINX_KEEPALIVE` | 25 | Seconds between keepalive heartbeats on a silent stream (Messages `ping`; on the Codex route, a repeated `response.in_progress`); the client's own idle timeout otherwise reports "the response stopped arriving" on a turn that is still in progress. 0 disables it. |
-| `DEVINX_PACE` | 4 | How many turns may be in flight at once on a credential that refused something recently. 0 disables the cap. |
-| `DEVINX_PACE_WINDOW` | 120 | Seconds after a refusal that `DEVINX_PACE` applies to that credential. |
-| `DEVINX_NETWORK_RETRIES` | 2 | Retries for a connection that breaks mid-response (reset, truncated stream) rather than being refused outright; these are not caught by the rate-limit/classifier retry loop. |
-| `DEVINX_LEAD_CAP` | 8000 | Token threshold above which the blocks leading into a flattened (collapsed) run of tool calls give way to text instead of replayed thinking, when unflattening a legacy history shape. |
-| `DEVINX_SUMMARY_TOKENS` | 16384 | `max_tokens` budget for the compaction summary call itself. |
-| `DEVINX_MID_CONV_REFUSALS` | 3 | How many times one conversation is told a mid-conversation system turn is not accepted before the proxy gives up and carries it through anyway. |
-| `DEVINX_DRAIN` | 2400 | Seconds a shutting-down process gives the turns it is already carrying before cutting them short. It no longer listens by then, so a long drain only means a lingering process; when it covers `DEVINX_RATE_WAIT`, the launcher replaces a busy older service instead of leaving it running (POSIX only). |
-| `DEVINX_MAX_SWE_INFLIGHT` | 64 | Maximum SWE-2 turns handled at once, counted apart from `DEVINX_MAX_INFLIGHT`, so held subagent turns never take capacity from the main session. Excess receives 503 `overloaded_error` with Retry-After 1. |
-| `DEVINX_RATE_FLOOR` | 3 | Minimum seconds a credential leaves rotation after a rate-limit refusal, even when the upstream says "reset in 0 seconds". |
+| `CCPROXY_MAX_INFLIGHT` | 64 | Maximum concurrent requests other than SWE-2 turns (claude-*/gpt-* relays, count_tokens, requests still being read); 0 disables the cap. Excess receives 503 with Retry-After. |
+| `CCPROXY_HTTP_READ_TIMEOUT` | 30 | Socket inactivity limit in seconds while receiving HTTP headers/body. |
+| `CCPROXY_CLIENT_WRITE_TIMEOUT` | 120 | Socket inactivity limit in seconds while writing to the client. |
+| `CCPROXY_MAX_FRAME` | 16777216 | Maximum encoded upstream Connect frame bytes. |
+| `CCPROXY_MAX_INFLATED_FRAME` | 67108864 | Maximum decoded frame bytes, including concatenated gzip streams. |
+| `CCPROXY_RELAY_READ_TIMEOUT` | 0 | Relay read inactivity limit in seconds; 0 keeps the previous unlimited read wait. |
+| `CCPROXY_COMPACT_STRICT` | 0 | Set to 1 for the strict compaction policy below. |
+| `CCPROXY_MAX_BODY` | 134217728 (128 MiB) | Maximum accepted request body size in bytes. |
+| `CCPROXY_KEEPALIVE` | 25 | Seconds between keepalive heartbeats on a silent stream (Messages `ping`; on the Codex route, a repeated `response.in_progress`); the client's own idle timeout otherwise reports "the response stopped arriving" on a turn that is still in progress. 0 disables it. |
+| `CCPROXY_PACE` | 4 | How many turns may be in flight at once on a credential that refused something recently. 0 disables the cap. |
+| `CCPROXY_PACE_WINDOW` | 120 | Seconds after a refusal that `CCPROXY_PACE` applies to that credential. |
+| `CCPROXY_NETWORK_RETRIES` | 2 | Retries for a connection that breaks mid-response (reset, truncated stream) rather than being refused outright; these are not caught by the rate-limit/classifier retry loop. |
+| `CCPROXY_LEAD_CAP` | 8000 | Token threshold above which the blocks leading into a flattened (collapsed) run of tool calls give way to text instead of replayed thinking, when unflattening a legacy history shape. |
+| `CCPROXY_SUMMARY_TOKENS` | 16384 | `max_tokens` budget for the compaction summary call itself. |
+| `CCPROXY_MID_CONV_REFUSALS` | 3 | How many times one conversation is told a mid-conversation system turn is not accepted before the proxy gives up and carries it through anyway. |
+| `CCPROXY_DRAIN` | 2400 | Seconds a shutting-down process gives the turns it is already carrying before cutting them short. It no longer listens by then, so a long drain only means a lingering process; when it covers `CCPROXY_RATE_WAIT`, the launcher replaces a busy older service instead of leaving it running (POSIX only). |
+| `CCPROXY_MAX_SWE_INFLIGHT` | 64 | Maximum SWE-2 turns handled at once, counted apart from `CCPROXY_MAX_INFLIGHT`, so held subagent turns never take capacity from the main session. Excess receives 503 `overloaded_error` with Retry-After 1. |
+| `CCPROXY_RATE_FLOOR` | 3 | Minimum seconds a credential leaves rotation after a rate-limit refusal, even when the upstream says "reset in 0 seconds". |
 
 Other existing settings, including the 128 MiB request body limit and drain
 budget, keep their defaults. Body framing now requires exactly one non-negative
@@ -119,7 +119,7 @@ than wiping every conversation's summary. Summaries still live in process memory
 
 By default the prior last-resort behaviour remains: if no summary is available,
 the proxy may discard middle turns with an explicit notice to the model.
-`DEVINX_COMPACT_STRICT=1` changes this **opt-in** policy: intermediate user/system
+`CCPROXY_COMPACT_STRICT=1` changes this **opt-in** policy: intermediate user/system
 text blocks are retained verbatim in chronological order alongside the summary;
 missing summaries, unexpected compaction failures and context that still exceeds
 the compaction budget produce an explicit unavailable error instead of silently
@@ -163,7 +163,7 @@ implied by the offline CI.
 
 ## Audit fixes (2026-09-23)
 
-- A turn has one wait budget (`DEVINX_RATE_WAIT`, 1800s), measured from its
+- A turn has one wait budget (`CCPROXY_RATE_WAIT`, 1800s), measured from its
   arrival and shared by compaction summaries, the summary fold and its own
   rate-limit and outage waits.
 - If the client disconnects while a turn is held (rate limit, outage,
@@ -180,8 +180,8 @@ implied by the offline CI.
 - Codex's catalog is fetched from chatgpt.com only for requests carrying
   `client_version`, and only Codex's own headers are forwarded; a Claude
   credential never leaves for chatgpt.com.
-- `/api/hello` also reports, as booleans only, whether `DEVINX_DUMP` and
-  `DEVINX_ALLOW_BROWSER` are active, and the launcher warns when a running
+- `/api/hello` also reports, as booleans only, whether `CCPROXY_DUMP` and
+  `CCPROXY_ALLOW_BROWSER` are active, and the launcher warns when a running
   daemon inherited one the current shell did not ask for.
 - The build id now covers dependency versions, and a missing file no longer
   turns it into "unknown".

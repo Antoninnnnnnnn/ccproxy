@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>devinx — télémétrie</title>
+<title>ccproxy — télémétrie</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <!-- Not render-blocking: on a phone the page used to wait for Google before
@@ -179,7 +179,7 @@ button.t:focus-visible{outline:2px solid var(--s1);outline-offset:2px}
 </head>
 <body>
 <header class="bar"><div class="bar-in">
-  <div class="brand">devinx <span>· télémétrie</span></div>
+  <div class="brand">ccproxy <span>· télémétrie</span></div>
   <div class="bar-meta">
     <span class="live"><span class="dot" id="dot"></span><span id="livetxt">connexion…</span></span>
     <span>build <b id="build">—</b></span>
@@ -886,7 +886,7 @@ const PRESETS = [
 ];
 let range = {id:"all"};
 try{
-  const saved = JSON.parse(localStorage.getItem("devinx-range") || "null");
+  const saved = JSON.parse(localStorage.getItem("ccproxy-range") || "null");
   if (saved && (saved.id === "custom" ? (saved.since || saved.until)
                                       : PRESETS.some(p => p.id === saved.id))) range = saved;
 }catch(e){}
@@ -926,7 +926,7 @@ $("applyrange").addEventListener("click", () => {
   range = {id:"custom", since: a || undefined, until: b || undefined};
   save(); drawRanges(); tick();
 });
-function save(){ try{ localStorage.setItem("devinx-range", JSON.stringify(range)); }catch(e){} }
+function save(){ try{ localStorage.setItem("ccproxy-range", JSON.stringify(range)); }catch(e){} }
 
 let fails = 0, inFlight = false;
 async function tick(){
@@ -936,7 +936,7 @@ async function tick(){
   inFlight = true;
   try{
     // Relative to the page, so the dashboard works both at :8316/dashboard and
-    // behind a path mount such as https://<host>/devinx/dashboard.
+    // behind a path mount such as https://<host>/ccproxy/dashboard.
     const url = new URL("api/stats", location.href.replace(/\/dashboard\/?$/, "/"));
     for (const [k, v] of Object.entries(rangeParams())) url.searchParams.set(k, v);
     const r = await fetch(url, {cache:"no-store", signal: AbortSignal.timeout(20000)});
@@ -976,9 +976,9 @@ $("theme").addEventListener("click", () => {
   const next = cur === "dark" ? "light" : cur === "light" ? "" : "dark";
   if (next) document.documentElement.setAttribute("data-theme", next);
   else document.documentElement.removeAttribute("data-theme");
-  try{ localStorage.setItem("devinx-theme", next); }catch(e){}
+  try{ localStorage.setItem("ccproxy-theme", next); }catch(e){}
 });
-try{ const t = localStorage.getItem("devinx-theme");
+try{ const t = localStorage.getItem("ccproxy-theme");
      if (t) document.documentElement.setAttribute("data-theme", t); }catch(e){}
 tick();
 setInterval(tick, 15000);

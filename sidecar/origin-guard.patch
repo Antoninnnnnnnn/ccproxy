@@ -13,7 +13,7 @@ index da3c842..e603b87 100644
 +        .with_state(state)
 +}
 +
-+/// Local patch (devinx): the listener spends a ChatGPT login it holds and takes
++/// Local patch (ccproxy): the listener spends a ChatGPT login it holds and takes
 +/// no client credential, so a page the user merely visits could POST to it (a
 +/// text/plain body needs no preflight) or read it back through DNS rebinding.
 +/// Real clients never send Origin and always name a loopback host.

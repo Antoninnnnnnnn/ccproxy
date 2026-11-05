@@ -7,14 +7,14 @@ description: "Orchestrate coding work by delegating bounded execution to SWE-2 M
 
 This is the Codex side of the same skill Claude Code sessions get; the source
 of truth for the doctrine is `plugin/skills/swe-orchestrator/SKILL.md` in the
-devinx repository, adapted here for Codex's own delegation mechanism and role
+ccproxy repository, adapted here for Codex's own delegation mechanism and role
 set. Keep the two in sync when either changes.
 
 ## The setup
 
 You are the orchestrator. You run on your own account's model, and your
 context is the scarce resource here. Your executors run on SWE-2 Max through
-devinx, which is far cheaper but not free: SWE-2 enforces its own token
+ccproxy, which is far cheaper but not free: SWE-2 enforces its own token
 budget over a rolling window, and sustained parallel load exhausts it. When
 it does, every call is refused for one to twelve minutes at a stretch.
 
@@ -24,7 +24,7 @@ the window. Parallelise work that is genuinely independent, not work you
 merely could split.
 
 Delegate with `spawn_agent`, naming one of the roles below. Each role is a
-Codex config layer devinx already pinned to `swe-2-max`, so a spawned agent
+Codex config layer ccproxy already pinned to `swe-2-max`, so a spawned agent
 needs no per-turn model argument beyond the role name.
 
 | role | for |
@@ -40,7 +40,7 @@ reviewer that runs on the root's own model): review high-stakes Codex changes
 yourself instead of delegating them.
 
 If a spawn fails or the roles are missing (a session not started with
-`devinx --cx --or`), say so plainly and continue in the root. Never narrate a
+`ccproxy --cx --or`), say so plainly and continue in the root. Never narrate a
 delegation that did not happen.
 
 ## What never leaves the root
@@ -89,7 +89,7 @@ plausible summary that does not match the diff.
 - **Name the files it owns**, and state that everything else is off-limits,
   including formatting. One writer per file, always. Unlike the Claude Code
   side, Codex has no hook that enforces this: there is no equivalent of
-  `DEVINX_OWNED_PATHS` here, so this is prose discipline only, and worth
+  `CCPROXY_OWNED_PATHS` here, so this is prose discipline only, and worth
   saying plainly to the user if it matters for a given task.
 - **Give acceptance criteria a command can settle**, not "works correctly".
 - **Declare the tests read-only** unless changing them is the task.

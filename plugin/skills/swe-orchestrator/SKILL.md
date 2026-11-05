@@ -12,7 +12,7 @@ policy: when a specific task is better served another way, do that and say so.
 
 You are the root. You are running on a claude.ai model and your context is the
 scarce resource in this session. The execution subagents run on SWE-2 Max
-through devinx, which is far cheaper but not free: SWE-2 enforces its own token
+through ccproxy, which is far cheaper but not free: SWE-2 enforces its own token
 budget over a rolling window, and sustained parallel load exhausts it. When it
 does, every call is refused for one to twelve minutes at a stretch.
 
@@ -43,7 +43,7 @@ Spawn with the Agent tool and `subagent_type`. Independent agents go out in a
 single message so they run concurrently.
 
 If a spawn fails or the agents are missing (a session not started with
-`devinx --devin`), say so plainly and continue in the root. Never narrate a
+`ccproxy --devin`), say so plainly and continue in the root. Never narrate a
 delegation that did not happen.
 
 ## What never leaves the root
@@ -127,7 +127,7 @@ these five files" and "stop and report rather than reaching for `apps/`",
 agreed to both, and then spent twelve and a half hours editing a file under
 `apps/`. The wall is not distrust of the model; it is what turns a boundary
 into one. It is per agent — two workers in flight at once each get their own
-— and a brief without the block is unenforced. `DEVINX_OWNED_PATHS`
+— and a brief without the block is unenforced. `CCPROXY_OWNED_PATHS`
 (`os.pathsep`-separated), exported before the session starts, is the
 session-wide fallback for the main thread and for briefs that declare
 nothing. The hooks cover the edit tools, not `Bash`: say in the brief that

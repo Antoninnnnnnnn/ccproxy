@@ -24,12 +24,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-import devinx
+import ccproxy
 from test_audit_fixes import LiveServer
 
 
 def event(kind, **fields):
-    return devinx.sse_bytes({"type": kind, **fields})
+    return ccproxy.sse_bytes({"type": kind, **fields})
 
 
 MESSAGE_START = event("message_start", message={
@@ -58,7 +58,7 @@ def error_event(kind, message="upstream failed", code=None):
     err = {"type": kind, "message": message}
     if code is not None:
         err["code"] = code
-    return devinx.sse_bytes({"type": "error", "error": err})
+    return ccproxy.sse_bytes({"type": "error", "error": err})
 
 
 def chop(data, size):
@@ -87,7 +87,7 @@ def upstream(chunks, status=200, headers=None, exc=None):
 
 def bare_handler(headers=None):
     """A Handler with no socket; whatever it writes lands in wfile."""
-    handler = devinx.Handler.__new__(devinx.Handler)
+    handler = ccproxy.Handler.__new__(ccproxy.Handler)
     handler.wfile = io.BytesIO()
     handler.command = "POST"
     handler.path = "/v1/messages"
@@ -114,7 +114,7 @@ class RelayHarness:
     def setUp(self):
         # A dump path left over from a real investigation must never make a
         # test write the request or the stream to disk.
-        patcher = mock.patch.dict(os.environ, {"DEVINX_DUMP": ""})
+        patcher = mock.patch.dict(os.environ, {"CCPROXY_DUMP": ""})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -122,7 +122,7 @@ class RelayHarness:
               **kwargs):
         handler = bare_handler(headers)
         log = io.StringIO()
-        with mock.patch.object(devinx.SESSION, "request",
+        with mock.patch.object(ccproxy.SESSION, "request",
                                side_effect=list(responses)) as request, \
              contextlib.redirect_stdout(log):
             handler.relay(raw, "model-x", "http://upstream/v1/messages", label,
@@ -138,44 +138,44 @@ class SseFrameTests(unittest.TestCase):
         # The \r\n\r\n arriving a byte at a time is still one boundary.
         raw = (b"event: ping\r\ndata: {\"type\":\"ping\"}\r\n\r\n"
                b"event: x\ndata: {\"type\":\"x\"}\n\n")
-        frames = list(devinx.sse_frames(chop(raw, 1)))
+        frames = list(ccproxy.sse_frames(chop(raw, 1)))
         self.assertEqual(len(frames), 2)
-        self.assertEqual(devinx.parse_sse_frame(frames[0]),
+        self.assertEqual(ccproxy.parse_sse_frame(frames[0]),
                          ("ping", {"type": "ping"}))
-        self.assertEqual(devinx.parse_sse_frame(frames[1]),
+        self.assertEqual(ccproxy.parse_sse_frame(frames[1]),
                          ("x", {"type": "x"}))
 
     def test_multi_data_lines_form_one_json(self):
         frame = b"data: {\"a\":\ndata: 1}\n\n"
-        self.assertEqual(devinx.parse_sse_frame(frame), (None, {"a": 1}))
+        self.assertEqual(ccproxy.parse_sse_frame(frame), (None, {"a": 1}))
 
     def test_comment_frames_carry_no_event(self):
-        self.assertEqual(list(devinx.sse_events([b": keep-alive\n\n"])),
+        self.assertEqual(list(ccproxy.sse_events([b": keep-alive\n\n"])),
                          [(None, None)])
 
     def test_utf8_split_mid_character_reassembles(self):
-        frame = devinx.sse_bytes({"type": "content_block_delta", "index": 0,
+        frame = ccproxy.sse_bytes({"type": "content_block_delta", "index": 0,
                                   "delta": {"type": "text_delta",
                                             "text": "héllo ✓"}})
-        events = list(devinx.sse_events(chop(frame, 3)))
+        events = list(ccproxy.sse_events(chop(frame, 3)))
         self.assertEqual(len(events), 1)
         name, data = events[0]
         self.assertEqual(data["delta"]["text"], "héllo ✓")
 
     def test_oversized_frame_is_refused(self):
-        with mock.patch.object(devinx, "MAX_FRAME_BYTES", 64):
+        with mock.patch.object(ccproxy, "MAX_FRAME_BYTES", 64):
             with self.assertRaises(ValueError):
-                list(devinx.sse_frames([b"data: " + b"x" * 100]))
+                list(ccproxy.sse_frames([b"data: " + b"x" * 100]))
 
     def test_malformed_data_parses_to_none_not_a_crash(self):
-        name, data = devinx.parse_sse_frame(b"data: {not json\n\n")
+        name, data = ccproxy.parse_sse_frame(b"data: {not json\n\n")
         self.assertIsNone(data)
 
 
 class UsageSnifferTests(unittest.TestCase):
 
     def test_usage_from_split_lines(self):
-        sniff = devinx.UsageSniffer()
+        sniff = ccproxy.UsageSniffer()
         raw = MESSAGE_START + MESSAGE_DELTA
         for piece in chop(raw, 7):
             sniff.feed(piece)
@@ -190,7 +190,7 @@ class ResponseChunkTests(unittest.TestCase):
         response = upstream([])
         response.raw = mock.Mock(spec=["read1", "stream"])
         response.raw.read1.side_effect = [COMMENT, b""]
-        self.assertEqual(list(devinx.response_chunks(response)), [COMMENT])
+        self.assertEqual(list(ccproxy.response_chunks(response)), [COMMENT])
         response.raw.stream.assert_not_called()
         response.raw.read1.assert_has_calls([
             mock.call(65536, decode_content=True),
@@ -198,7 +198,7 @@ class ResponseChunkTests(unittest.TestCase):
 
     def test_older_identity_reader_does_not_fill_a_decoded_buffer(self):
         response = upstream([COMMENT])
-        self.assertEqual(list(devinx.response_chunks(response)), [COMMENT])
+        self.assertEqual(list(ccproxy.response_chunks(response)), [COMMENT])
         response.raw.stream.assert_called_once_with(65536, decode_content=False)
 
 
@@ -260,7 +260,7 @@ class RelayStreamTests(RelayHarness, unittest.TestCase):
                        "error": {"message": "no type at all"}}):
             with self.subTest(error=error):
                 request, log, status, headers, body = self.relay(
-                    [upstream([MESSAGE_START, devinx.sse_bytes(error)])])
+                    [upstream([MESSAGE_START, ccproxy.sse_bytes(error)])])
                 self.assertIn("status=stream_error", log)
                 self.assertIn("error_type=api_error", log)
                 self.assertIn(b"event: error", body)
@@ -303,7 +303,7 @@ class RelayStreamTests(RelayHarness, unittest.TestCase):
         self.assertIn("error_type=api_error", log)
 
     def test_oversized_frame_is_a_stream_error_not_a_crash(self):
-        with mock.patch.object(devinx, "MAX_FRAME_BYTES", 64):
+        with mock.patch.object(ccproxy, "MAX_FRAME_BYTES", 64):
             request, log, status, headers, body = self.relay(
                 [upstream([b"data: " + b"x" * 100 + b"\n\n"])])
         self.assertIn("status=stream_error", log)
@@ -367,7 +367,7 @@ class GptRetryTests(RelayHarness, unittest.TestCase):
 
     def relay_gpt(self, responses):
         return self.relay(responses, label="gpt", headers=self.HEADERS,
-                          strip=devinx.GPT_STRIPPED)
+                          strip=ccproxy.GPT_STRIPPED)
 
     def test_pre_content_error_retries_once(self):
         request, log, status, headers, body = self.relay_gpt([
@@ -444,12 +444,12 @@ class GptRetryTests(RelayHarness, unittest.TestCase):
         # A context refusal on the already-committed retry must become an SSE
         # error event, not another HTTP response down the same stream.
         def on_error(status, text):
-            return devinx.RETRY
+            return ccproxy.RETRY
         request, log, status, headers, body = self.relay(
             [upstream([MESSAGE_START, error_event("api_error")]),
              upstream([b'{"type":"error"}'], status=413,
                       headers={"content-type": "application/json"})],
-            label="gpt", headers=self.HEADERS, strip=devinx.GPT_STRIPPED,
+            label="gpt", headers=self.HEADERS, strip=ccproxy.GPT_STRIPPED,
             on_error=on_error)
         self.assertEqual(request.call_count, 2)
         self.assertNotIn(b"HTTP/1.1", body)
@@ -463,7 +463,7 @@ class GptRetryTests(RelayHarness, unittest.TestCase):
                     [upstream([MESSAGE_START, error_event("api_error")]),
                      upstream([b"context exceeded"], status=413,
                               headers={"content-type": "application/json"})],
-                    label="gpt", raw=raw, on_error=lambda status, text: devinx.RETRY)
+                    label="gpt", raw=raw, on_error=lambda status, text: ccproxy.RETRY)
                 self.assertEqual(request.call_count, 2)
                 self.assertNotIn(b"HTTP/1.1", body)
                 self.assertIn(b"event: error", body)
@@ -565,7 +565,7 @@ class LiveStreamTests(unittest.TestCase):
                         "content-encoding": "gzip"},
             "body": gzip.compress(b"".join(OK_STREAM))}])
         self.addCleanup(upstream_server.close)
-        with mock.patch.object(devinx, "CLAUDE_UPSTREAM", upstream_server.url):
+        with mock.patch.object(ccproxy, "CLAUDE_UPSTREAM", upstream_server.url):
             status, headers, body = post(
                 self.live.port, "/v1/messages",
                 {"model": "claude-test", "max_tokens": 8,
@@ -617,7 +617,7 @@ class LiveStreamTests(unittest.TestCase):
                 url = f"http://127.0.0.1:{upstream_server.server_address[1]}"
                 conn = http.client.HTTPConnection("127.0.0.1", self.live.port, timeout=2)
                 try:
-                    with mock.patch.object(devinx, "CLAUDE_UPSTREAM", url):
+                    with mock.patch.object(ccproxy, "CLAUDE_UPSTREAM", url):
                         conn.request("POST", "/v1/messages", body=json.dumps({
                             "model": "claude-test", "stream": True,
                             "messages": [{"role": "user", "content": "hi"}]}),
@@ -643,7 +643,7 @@ class LiveStreamTests(unittest.TestCase):
              "headers": {"content-type": "text/event-stream"},
              "body": b"".join(OK_STREAM)}])
         self.addCleanup(upstream_server.close)
-        with mock.patch.object(devinx, "GPT_UPSTREAM", upstream_server.url):
+        with mock.patch.object(ccproxy, "GPT_UPSTREAM", upstream_server.url):
             status, headers, body = post(
                 self.live.port, "/v1/messages",
                 {"model": "gpt-6-luna", "max_tokens": 8, "stream": True,

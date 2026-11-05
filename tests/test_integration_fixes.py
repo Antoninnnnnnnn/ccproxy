@@ -16,9 +16,9 @@ import runtime_support  # noqa: E402
 
 def run_hook(event, env_paths=None):
     env = dict(os.environ)
-    env.pop("DEVINX_OWNED_PATHS", None)
+    env.pop("CCPROXY_OWNED_PATHS", None)
     if env_paths is not None:
-        env["DEVINX_OWNED_PATHS"] = env_paths
+        env["CCPROXY_OWNED_PATHS"] = env_paths
     r = subprocess.run([sys.executable, HOOK], input=json.dumps(event),
                        capture_output=True, text=True, env=env)
     return r.returncode, r.stderr
@@ -75,13 +75,13 @@ class PerAgentOwnershipTests(unittest.TestCase):
 class RiskySwitchTests(unittest.TestCase):
     def test_inherited_dump_is_reported(self):
         warnings = diagnostics.configuration_mismatches(
-            {}, {"DEVINX_DUMP": True, "DEVINX_ALLOW_BROWSER": False})
-        self.assertTrue(any("DEVINX_DUMP is active" in w for w in warnings))
+            {}, {"CCPROXY_DUMP": True, "CCPROXY_ALLOW_BROWSER": False})
+        self.assertTrue(any("CCPROXY_DUMP is active" in w for w in warnings))
         self.assertFalse(any("ALLOW_BROWSER" in w for w in warnings))
 
     def test_requested_but_missing_is_reported(self):
         warnings = diagnostics.configuration_mismatches(
-            {"DEVINX_ALLOW_BROWSER": "1"}, {"DEVINX_ALLOW_BROWSER": False})
+            {"CCPROXY_ALLOW_BROWSER": "1"}, {"CCPROXY_ALLOW_BROWSER": False})
         self.assertTrue(any("requested" in w for w in warnings))
 
     def test_old_service_without_the_fields_says_nothing(self):
@@ -109,11 +109,11 @@ class PortLockTests(unittest.TestCase):
         self.assertEqual(other.returncode, 0)
 
     def test_server_no_longer_shares_its_port(self):
-        import devinx
-        a = devinx.Server(("127.0.0.1", 0), devinx.Handler)
+        import ccproxy
+        a = ccproxy.Server(("127.0.0.1", 0), ccproxy.Handler)
         self.addCleanup(a.server_close)
         with self.assertRaises(OSError):
-            devinx.Server(("127.0.0.1", a.server_port), devinx.Handler)
+            ccproxy.Server(("127.0.0.1", a.server_port), ccproxy.Handler)
 
 
 class HelloProofTests(unittest.TestCase):
@@ -142,7 +142,7 @@ class HelloProofTests(unittest.TestCase):
                 def do_GET(self):
                     nonce = parse_qs(urlsplit(self.path).query).get("nonce", [""])[0]
                     proof = runtime_support.hello_proof(secret if mode["good"] else "x" * 64, nonce)
-                    body = json.dumps({"service": "devinx", "build": launcher.local_build(),
+                    body = json.dumps({"service": "ccproxy", "build": launcher.local_build(),
                                        "pid": 1, "inflight": 0, "proof": proof}).encode()
                     self.send_response(200)
                     self.send_header("content-length", str(len(body)))
@@ -169,8 +169,8 @@ class BusyStaleReplacementTests(unittest.TestCase):
         import contextlib
         from unittest import mock
         import launcher
-        info = {"service": "devinx", "build": "old", "pid": 4242, "inflight": inflight,
-                "configuration": {"DEVINX_DRAIN": drain, "DEVINX_RATE_WAIT": budget}}
+        info = {"service": "ccproxy", "build": "old", "pid": 4242, "inflight": inflight,
+                "configuration": {"CCPROXY_DRAIN": drain, "CCPROXY_RATE_WAIT": budget}}
         stopped = []
         proc = mock.Mock()
         proc.poll.return_value = None
@@ -179,7 +179,7 @@ class BusyStaleReplacementTests(unittest.TestCase):
              mock.patch.object(launcher, "stop_service", side_effect=lambda i: stopped.append(i) or True), \
              mock.patch.object(launcher, "start_service", return_value=proc), \
              mock.patch.object(launcher, "listening", return_value=True), \
-             mock.patch.object(launcher, "_validate_devinx_env", return_value=True), \
+             mock.patch.object(launcher, "_validate_ccproxy_env", return_value=True), \
              mock.patch.object(launcher.sys, "platform", "linux"), \
              mock.patch.object(launcher.sys, "stderr"):
             self.assertTrue(launcher.ensure_service())

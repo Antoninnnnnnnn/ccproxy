@@ -27,7 +27,7 @@ wrote it. So the declaration is found from the agent itself, with nothing
 to correlate and nothing for the root to configure: two parallel workers of
 the same type each get their own boundary.
 
-DEVINX_OWNED_PATHS (os.pathsep-separated) is the session-wide fallback: it
+CCPROXY_OWNED_PATHS (os.pathsep-separated) is the session-wide fallback: it
 applies to the main thread and to any subagent whose brief declares nothing.
 With neither, this hook does nothing at all — no fleet-wide default, because
 a boundary nobody declared is not a boundary and guessing one would break
@@ -163,7 +163,10 @@ def _run():
     patterns = declared_patterns(event)
     if patterns is None:
         # os.pathsep, not a literal ':': on Windows that splits "C:\..." in half.
-        patterns = [p for p in os.environ.get("DEVINX_OWNED_PATHS", "").split(os.pathsep) if p]
+        # DEVINX_OWNED_PATHS: the same setting under the project's former name.
+        setting = (os.environ.get("CCPROXY_OWNED_PATHS")
+                   or os.environ.get("DEVINX_OWNED_PATHS", ""))
+        patterns = [p for p in setting.split(os.pathsep) if p]
     if not patterns:
         return 0
     if event.get("tool_name") not in WRITERS:

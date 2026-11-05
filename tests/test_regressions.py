@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Offline regression tests for devinx.
+"""Offline regression tests for ccproxy.
 
 One test per shipped fix: reverting the fix must fail the matching test.
 Everything here runs with no network, no credentials and no Devin login —
-the one upstream call in the compact path (devinx.summarise_turns) is
+the one upstream call in the compact path (ccproxy.summarise_turns) is
 monkeypatched out, and every other function under test is pure or touches
 only a temp file.
 
@@ -32,9 +32,9 @@ from unittest import mock
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # These tests exercise the SWE-2 route, which is off by default.
-os.environ.setdefault("DEVINX_SWE", "1")
+os.environ.setdefault("CCPROXY_SWE", "1")
 
-import devinx
+import ccproxy
 import install
 import launcher
 
@@ -97,8 +97,8 @@ class TomlStringTests(unittest.TestCase):
 
     def test_toml_string_round_trips_through_tomllib(self):
         cases = [
-            "/home/André/devinx",   # non-ASCII, BMP
-            "/home/\U0001F680/devinx",  # emoji, non-BMP: the surrogate-pair bug
+            "/home/André/ccproxy",   # non-ASCII, BMP
+            "/home/\U0001F680/ccproxy",  # emoji, non-BMP: the surrogate-pair bug
             '/a"b\\c',              # embedded quote and backslash
             "/tab\there",           # literal tab character
             "/tab\\there",          # literal backslash before a t
@@ -160,14 +160,14 @@ class ToolIdTests(unittest.TestCase):
     """Cognition tool ids can contain characters Anthropic rejects."""
 
     def test_safe_tool_id_keeps_a_valid_id(self):
-        self.assertEqual(devinx.safe_tool_id("toolu_01ABC"), "toolu_01ABC")
+        self.assertEqual(ccproxy.safe_tool_id("toolu_01ABC"), "toolu_01ABC")
 
     def test_safe_tool_id_sanitises_without_colliding(self):
-        fixed = devinx.safe_tool_id("read_file_0#abc")
+        fixed = ccproxy.safe_tool_id("read_file_0#abc")
         self.assertRegex(fixed, r"^[a-zA-Z0-9_-]+$")
         # Ids differing only in a replaced character must not collapse.
-        self.assertNotEqual(devinx.safe_tool_id("a#b"),
-                            devinx.safe_tool_id("a_b"))
+        self.assertNotEqual(ccproxy.safe_tool_id("a#b"),
+                            ccproxy.safe_tool_id("a_b"))
 
     def test_repair_tool_ids_rewrites_pair_to_the_same_id(self):
         body = {"messages": [
@@ -177,7 +177,7 @@ class ToolIdTests(unittest.TestCase):
             {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": "read_file_0#abc",
                  "content": "ok"}]}]}
-        self.assertTrue(devinx.repair_tool_ids(body))
+        self.assertTrue(ccproxy.repair_tool_ids(body))
         new_id = body["messages"][0]["content"][0]["id"]
         self.assertRegex(new_id, r"^[a-zA-Z0-9_-]+$")
         self.assertEqual(
@@ -186,7 +186,7 @@ class ToolIdTests(unittest.TestCase):
     def test_repair_tool_ids_changes_nothing_without_tool_blocks(self):
         body = {"messages": [{"role": "user", "content": "hello"}]}
         snapshot = copy.deepcopy(body)
-        self.assertFalse(devinx.repair_tool_ids(body))
+        self.assertFalse(ccproxy.repair_tool_ids(body))
         self.assertEqual(body, snapshot)
 
 
@@ -194,7 +194,7 @@ class AnthropicErrorTests(unittest.TestCase):
     """Upstream refusals must surface as the error types clients act on."""
 
     def test_rate_limit_maps_to_429_with_retry_after(self):
-        kind, status, _, retry_after = devinx.anthropic_error(
+        kind, status, _, retry_after = ccproxy.anthropic_error(
             "resource_exhausted: … Your limit will reset in 11 minutes.")
         self.assertEqual(kind, "rate_limit_error")
         self.assertEqual(status, 429)
@@ -202,7 +202,7 @@ class AnthropicErrorTests(unittest.TestCase):
 
     def test_prompt_too_long_message_is_client_parseable(self):
         body = {"messages": [{"role": "user", "content": "x" * 4000}]}
-        kind, status, message, _ = devinx.anthropic_error(
+        kind, status, message, _ = ccproxy.anthropic_error(
             "invalid_argument: The prompt is too long for this model", body)
         self.assertEqual(kind, "invalid_request_error")
         self.assertEqual(status, 400)
@@ -211,11 +211,11 @@ class AnthropicErrorTests(unittest.TestCase):
         m = re.search(
             r"prompt is too long[^0-9]*(\d+)\s*tokens?\s*>\s*(\d+)", message)
         self.assertIsNotNone(m)
-        self.assertEqual(int(m.group(1)), devinx.estimate_tokens(body))
-        self.assertEqual(int(m.group(2)), devinx.SWE_CONTEXT_TOKENS)
+        self.assertEqual(int(m.group(1)), ccproxy.estimate_tokens(body))
+        self.assertEqual(int(m.group(2)), ccproxy.SWE_CONTEXT_TOKENS)
 
     def test_unknown_code_maps_to_api_error_502(self):
-        kind, status, message, retry_after = devinx.anthropic_error(
+        kind, status, message, retry_after = ccproxy.anthropic_error(
             "weird_code: boom")
         self.assertEqual((kind, status), ("api_error", 502))
         self.assertEqual(message, "weird_code: boom")
@@ -231,8 +231,8 @@ class EstimateTokensTests(unittest.TestCase):
             {"type": "text", "text": "look at this"}]}]}
         with_img = copy.deepcopy(base)
         with_img["messages"][0]["content"].append(_image(50_000))
-        self.assertGreater(devinx.estimate_tokens(with_img),
-                           devinx.estimate_tokens(base))
+        self.assertGreater(ccproxy.estimate_tokens(with_img),
+                           ccproxy.estimate_tokens(base))
 
     def test_image_inside_tool_result_counts(self):
         base = {"messages": [{"role": "user", "content": [
@@ -240,8 +240,8 @@ class EstimateTokensTests(unittest.TestCase):
              "content": [{"type": "text", "text": "result"}]}]}]}
         with_img = copy.deepcopy(base)
         with_img["messages"][0]["content"][0]["content"].append(_image(50_000))
-        self.assertGreater(devinx.estimate_tokens(with_img),
-                           devinx.estimate_tokens(base))
+        self.assertGreater(ccproxy.estimate_tokens(with_img),
+                           ccproxy.estimate_tokens(base))
 
 
 class CompactBodyTests(unittest.TestCase):
@@ -255,10 +255,10 @@ class CompactBodyTests(unittest.TestCase):
                 "role": "assistant" if i % 2 else "user",
                 "content": f"turn {i} " + "y" * 120})
         body = {"model": "swe-2-max", "messages": messages}
-        with mock.patch.object(devinx, "COMPACT_AT", 200), \
-             mock.patch.object(devinx, "summarise_turns",
+        with mock.patch.object(ccproxy, "COMPACT_AT", 200), \
+             mock.patch.object(ccproxy, "summarise_turns",
                                return_value=marker) as summary:
-            out = devinx.compact_body(body)
+            out = ccproxy.compact_body(body)
         self.assertTrue(summary.called)
         compacted = out["messages"]
         self.assertLess(len(compacted), len(messages))
@@ -270,24 +270,24 @@ class CompactBodyTests(unittest.TestCase):
     def test_short_conversation_is_returned_unchanged(self):
         # summarise_turns is patched to explode: if compaction reaches for
         # the upstream here, that is the regression.
-        with mock.patch.object(devinx, "summarise_turns",
+        with mock.patch.object(ccproxy, "summarise_turns",
                                side_effect=AssertionError("summarise called")):
             tiny = {"model": "swe-2-max", "messages": [
                 {"role": "user", "content": "hi"},
                 {"role": "assistant", "content": "hello"}]}
-            self.assertIs(devinx.compact_body(tiny), tiny)
-            with mock.patch.object(devinx, "COMPACT_AT", 10 ** 9):
+            self.assertIs(ccproxy.compact_body(tiny), tiny)
+            with mock.patch.object(ccproxy, "COMPACT_AT", 10 ** 9):
                 small = {"model": "swe-2-max", "messages": [
                     {"role": "user" if i % 2 == 0 else "assistant",
                      "content": "ok"} for i in range(6)]}
-                self.assertIs(devinx.compact_body(small), small)
+                self.assertIs(ccproxy.compact_body(small), small)
 
 
 class PackagedAgentsTests(unittest.TestCase):
     def setUp(self):
-        # mcp__* is appended to disallowedTools unless DEVINX_SUBAGENT_MCP=1;
+        # mcp__* is appended to disallowedTools unless CCPROXY_SUBAGENT_MCP=1;
         # pin it so the assertions do not depend on the ambient environment.
-        patcher = mock.patch.dict(os.environ, {"DEVINX_SUBAGENT_MCP": "0"})
+        patcher = mock.patch.dict(os.environ, {"CCPROXY_SUBAGENT_MCP": "0"})
         patcher.start()
         self.addCleanup(patcher.stop)
         self.agents = launcher.packaged_agents()
@@ -327,20 +327,20 @@ class FlattenedConversationTests(unittest.TestCase):
         self.calls = []
         # The summary cache outlives a request on purpose; it must not outlive
         # a test, or the second one starts from the first one's summary.
-        devinx._summaries.clear()
+        ccproxy._summaries.clear()
 
         def fake(messages, model, system, previous):
-            n = sum(len(devinx._blocks(m.get("content"))) for m in messages)
+            n = sum(len(ccproxy._blocks(m.get("content"))) for m in messages)
             self.calls.append(n)
             return f"SUMMARY#{len(self.calls)}"
 
-        patcher = mock.patch.object(devinx, "summarise_turns", fake)
+        patcher = mock.patch.object(ccproxy, "summarise_turns", fake)
         patcher.start()
         self.addCleanup(patcher.stop)
         # Real uncovered blocks are now tracked by content; the old counter
         # accidentally carried old results twice. Use a budget that actually
         # fills with the new blocks in this fixture, keeping the same assertions.
-        budget = mock.patch.object(devinx, "COMPACT_AT", 100000)
+        budget = mock.patch.object(ccproxy, "COMPACT_AT", 100000)
         budget.start()
         self.addCleanup(budget.stop)
 
@@ -376,7 +376,7 @@ class FlattenedConversationTests(unittest.TestCase):
         # and that is what must still work.
         seen = []
         for pairs in (260, 300, 340, 380):
-            out = devinx.compact_body(self._body(pairs))
+            out = ccproxy.compact_body(self._body(pairs))
             marks = self._summary_of(out)
             self.assertTrue(marks, "the body was not compacted at all")
             seen.append(marks[-1])
@@ -392,9 +392,9 @@ class FlattenedConversationTests(unittest.TestCase):
         self.assertTrue(all(c < 300 for c in self.calls[1:]), self.calls)
 
     def test_a_shorter_conversation_drops_the_previous_summary(self):
-        devinx.compact_body(self._body(269))
+        ccproxy.compact_body(self._body(269))
         first = len(self.calls)
-        devinx.compact_body(self._body(260))
+        ccproxy.compact_body(self._body(260))
         self.assertGreater(self.calls[-1], 100,
                            "a restarted run re-summarised only the new blocks")
         self.assertGreater(len(self.calls), first)
@@ -423,7 +423,7 @@ class UnflattenTests(unittest.TestCase):
         ]
 
     def test_pairs_get_their_own_turns_in_order(self):
-        out = devinx.unflatten_body({"messages": self._flat(40)})["messages"]
+        out = ccproxy.unflatten_body({"messages": self._flat(40)})["messages"]
         # task, then what led into the run, then one turn per call and answer.
         self.assertEqual(len(out), 2 + 40 * 2)
         self.assertEqual(out[1]["content"][0]["type"], "thinking")
@@ -441,7 +441,7 @@ class UnflattenTests(unittest.TestCase):
             [{"type": "thinking", "thinking": "z" * 40000} for _ in range(4)]
             + [{"type": "text", "text": "what I am doing"}]
             + [b for b in flat[1]["content"] if b.get("type") == "tool_use"])
-        out = devinx.unflatten_body({"messages": flat})["messages"]
+        out = ccproxy.unflatten_body({"messages": flat})["messages"]
         lead = out[1]["content"]
         self.assertTrue(all(b["type"] == "text" for b in lead),
                         "replayed thinking was kept past the cap")
@@ -454,7 +454,7 @@ class UnflattenTests(unittest.TestCase):
                               if b["tool_use_id"] != "t7"]
         flat[2]["content"].append({"type": "tool_result", "tool_use_id": "zz",
                                    "content": [{"type": "text", "text": "orphan"}]})
-        out = devinx.unflatten_body({"messages": flat})["messages"]
+        out = ccproxy.unflatten_body({"messages": flat})["messages"]
         wire = json.dumps(out)
         self.assertIn("orphan", wire, "an unmatched answer was dropped")
         ids = [b["tool_use_id"] for m in out for b in m["content"]
@@ -473,7 +473,7 @@ class UnflattenTests(unittest.TestCase):
                 [{"type": "tool_result", "tool_use_id": f"t{i}", "content": []}
                  for i in range(20)]},
         ]
-        self.assertEqual(devinx.unflatten_body({"messages": normal})["messages"],
+        self.assertEqual(ccproxy.unflatten_body({"messages": normal})["messages"],
                          normal)
 
     def test_the_tail_survives_compaction_once_order_is_restored(self):
@@ -493,18 +493,18 @@ class UnflattenTests(unittest.TestCase):
         ]
         body = {"model": "swe-2-max", "system": "s", "metadata": {"user_id": "u"},
                 "messages": flat}
-        devinx._summaries.clear()
-        with mock.patch.object(devinx, "summarise_turns",
+        ccproxy._summaries.clear()
+        with mock.patch.object(ccproxy, "summarise_turns",
                                lambda *a, **k: "SUMMARY"):
-            flat_out = devinx.compact_body(copy.deepcopy(body))
-            devinx._summaries.clear()
-            restored = devinx.compact_body(devinx.unflatten_body(copy.deepcopy(body)))
+            flat_out = ccproxy.compact_body(copy.deepcopy(body))
+            ccproxy._summaries.clear()
+            restored = ccproxy.compact_body(ccproxy.unflatten_body(copy.deepcopy(body)))
         # Collapsed, the tail is whatever single message fits, and here that is
         # nothing at all. Restored, the recent turns come through in clear.
         self.assertNotIn("/f259", json.dumps(flat_out))
         self.assertIn("/f259", json.dumps(restored))
-        self.assertGreater(devinx.estimate_tokens(restored),
-                           10 * devinx.estimate_tokens(flat_out))
+        self.assertGreater(ccproxy.estimate_tokens(restored),
+                           10 * ccproxy.estimate_tokens(flat_out))
 
 
 class SummaryResilienceTests(unittest.TestCase):
@@ -531,11 +531,11 @@ class SummaryResilienceTests(unittest.TestCase):
             {"name": "test-a", "blocked_until": 0},
             {"name": "test-b", "blocked_until": 0},
         ]
-        with mock.patch.object(devinx, "_accounts", fake_accounts), \
-             mock.patch.object(devinx, "_turn", {"n": 0}), \
-             mock.patch.object(devinx, "chat_stream", flaky), \
-             mock.patch.object(devinx, "build_request", lambda b, **k: (None, None)):
-            out = devinx.summarise_turns(
+        with mock.patch.object(ccproxy, "_accounts", fake_accounts), \
+             mock.patch.object(ccproxy, "_turn", {"n": 0}), \
+             mock.patch.object(ccproxy, "chat_stream", flaky), \
+             mock.patch.object(ccproxy, "build_request", lambda b, **k: (None, None)):
+            out = ccproxy.summarise_turns(
                 [{"role": "user", "content": [{"type": "text", "text": "x"}]}],
                 "swe-2-max", "sys")
         self.assertEqual(out, "SUMMARY")
@@ -563,10 +563,10 @@ class SummaryResilienceTests(unittest.TestCase):
                     {"role": "system", "content": [
                         {"type": "text", "text": "keep going"}]},
                 ]}
-        devinx._summaries.clear()
-        with mock.patch.object(devinx, "summarise_turns", lambda *a, **k: None):
-            out = devinx.compact_body(devinx.unflatten_body(copy.deepcopy(body)))
-        self.assertLess(devinx.estimate_tokens(out), devinx.COMPACT_AT,
+        ccproxy._summaries.clear()
+        with mock.patch.object(ccproxy, "summarise_turns", lambda *a, **k: None):
+            out = ccproxy.compact_body(ccproxy.unflatten_body(copy.deepcopy(body)))
+        self.assertLess(ccproxy.estimate_tokens(out), ccproxy.COMPACT_AT,
                         "the turn went out over the limit and would be refused")
         self.assertIn("no summary of the removed turns could be made",
                       json.dumps(out), "the agent was not told what it lost")
@@ -591,17 +591,17 @@ class SummaryResilienceTests(unittest.TestCase):
                             {"type": "text", "text": "keep going"}]},
                     ]}
 
-        devinx._summaries.clear()
-        with mock.patch.object(devinx, "summarise_turns",
+        ccproxy._summaries.clear()
+        with mock.patch.object(ccproxy, "summarise_turns",
                                lambda *a, **k: "FIRST-SUMMARY"):
-            devinx.compact_body(body(260))
+            ccproxy.compact_body(body(260))
         # Every credential is now refusing: the extension cannot be made.
-        with mock.patch.object(devinx, "summarise_turns", lambda *a, **k: None):
-            out = devinx.compact_body(body(300))
+        with mock.patch.object(ccproxy, "summarise_turns", lambda *a, **k: None):
+            out = ccproxy.compact_body(body(300))
         self.assertIn("FIRST-SUMMARY", json.dumps(out),
                       "the standing summary was thrown away")
-        self.assertLess(devinx.estimate_tokens(out),
-                        devinx.estimate_tokens(body(300)) // 2,
+        self.assertLess(ccproxy.estimate_tokens(out),
+                        ccproxy.estimate_tokens(body(300)) // 2,
                         "the turn went out whole and would have been refused")
 
 
@@ -617,8 +617,8 @@ class UnknownRoleTests(unittest.TestCase):
             {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
             {"role": "system", "content": [{"type": "text", "text": "MARKER-B"}]},
         ]}
-        with mock.patch.object(devinx, "api_key", return_value="test-only"):
-            req, _ = devinx.build_request(body)
+        with mock.patch.object(ccproxy, "api_key", return_value="test-only"):
+            req, _ = ccproxy.build_request(body)
         wire = str(req)
         self.assertIn("MARKER-A", wire)
         self.assertIn("MARKER-B", wire)
@@ -684,9 +684,9 @@ class OwnershipGuardTests(unittest.TestCase):
         import subprocess
         env = dict(os.environ)
         if owned is None:
-            env.pop("DEVINX_OWNED_PATHS", None)
+            env.pop("CCPROXY_OWNED_PATHS", None)
         else:
-            env["DEVINX_OWNED_PATHS"] = owned
+            env["CCPROXY_OWNED_PATHS"] = owned
         event = json.dumps({"tool_name": tool, "cwd": cwd,
                             "tool_input": {"file_path": target}})
         return subprocess.run([sys.executable, self.GUARD], input=event,
@@ -726,7 +726,7 @@ class PacingTests(unittest.TestCase):
 
     def test_a_credential_serving_normally_is_never_held_back(self):
         acct = {"name": "t", "blocked_until": 0}
-        with devinx.paced(acct):
+        with ccproxy.paced(acct):
             pass
         self.assertIsNone(acct.get("pace"), "a semaphore was created for nothing")
 
@@ -736,15 +736,15 @@ class PacingTests(unittest.TestCase):
         import time
         now = time.time()
         acct = {"name": "t", "refused_at": now - 1800, "blocked_until": now - 10}
-        self.assertIsNot(type(devinx.paced(acct)), type(contextlib.nullcontext()),
+        self.assertIsNot(type(ccproxy.paced(acct)), type(contextlib.nullcontext()),
                          "the cap had lapsed by the end of the block")
 
     def test_the_cap_lapses_once_the_credential_has_been_back_a_while(self):
         import time
         now = time.time()
         acct = {"name": "t", "refused_at": now - 1800,
-                "blocked_until": now - devinx.PACE_WINDOW - 5}
-        self.assertIs(type(devinx.paced(acct)), type(contextlib.nullcontext()))
+                "blocked_until": now - ccproxy.PACE_WINDOW - 5}
+        self.assertIs(type(ccproxy.paced(acct)), type(contextlib.nullcontext()))
 
     def test_a_credential_that_just_refused_is_capped(self):
         import threading, time
@@ -752,7 +752,7 @@ class PacingTests(unittest.TestCase):
         held, peak, lock = [0], [0], threading.Lock()
 
         def worker():
-            with devinx.paced(acct):
+            with ccproxy.paced(acct):
                 with lock:
                     held[0] += 1
                     peak[0] = max(peak[0], held[0])
@@ -765,7 +765,7 @@ class PacingTests(unittest.TestCase):
             t.start()
         for t in threads:
             t.join()
-        self.assertLessEqual(peak[0], devinx.PACE_CONCURRENCY)
+        self.assertLessEqual(peak[0], ccproxy.PACE_CONCURRENCY)
         self.assertEqual(held[0], 0, "the cap was not released")
 
 
@@ -773,12 +773,12 @@ class ResetDelayTests(unittest.TestCase):
     """The upstream answers in whichever unit reads best."""
 
     def test_every_unit_is_understood(self):
-        self.assertEqual(devinx.reset_delay("Your limit will reset in 20 seconds."), 20)
-        self.assertEqual(devinx.reset_delay("reset in 2 minutes"), 120)
-        self.assertEqual(devinx.reset_delay("reset in 1 hour"), 3600)
+        self.assertEqual(ccproxy.reset_delay("Your limit will reset in 20 seconds."), 20)
+        self.assertEqual(ccproxy.reset_delay("reset in 2 minutes"), 120)
+        self.assertEqual(ccproxy.reset_delay("reset in 1 hour"), 3600)
 
     def test_an_unparseable_message_falls_back(self):
-        self.assertEqual(devinx.reset_delay("no idea", default=30), 30)
+        self.assertEqual(ccproxy.reset_delay("no idea", default=30), 30)
 
 
 class EstimateTests(unittest.TestCase):
@@ -792,7 +792,7 @@ class EstimateTests(unittest.TestCase):
     def _one(self, block):
         body = {"messages": [{"role": "user", "content": [block]}]}
         raw = len(json.dumps(body, default=str)) // 4
-        return raw, devinx.estimate_tokens(body)
+        return raw, ccproxy.estimate_tokens(body)
 
     def test_every_tool_result_shape_is_counted(self):
         shapes = [
@@ -852,13 +852,13 @@ class KeepaliveTests(unittest.TestCase):
             pass
 
     def setUp(self):
-        self._every = devinx.KEEPALIVE_EVERY
-        devinx.KEEPALIVE_EVERY = 1      # compress the clock
-        self.addCleanup(setattr, devinx, "KEEPALIVE_EVERY", self._every)
+        self._every = ccproxy.KEEPALIVE_EVERY
+        ccproxy.KEEPALIVE_EVERY = 1      # compress the clock
+        self.addCleanup(setattr, ccproxy, "KEEPALIVE_EVERY", self._every)
 
     def test_a_silent_turn_holds_its_connection_open(self):
         w = self.Sock()
-        out = devinx.AnthropicStream(w, "swe-2-max")
+        out = ccproxy.AnthropicStream(w, "swe-2-max")
         out.arm()
         time.sleep(3.5)
         out.release()
@@ -870,7 +870,7 @@ class KeepaliveTests(unittest.TestCase):
 
     def test_nothing_is_written_after_release(self):
         w = self.Sock()
-        out = devinx.AnthropicStream(w, "swe-2-max")
+        out = ccproxy.AnthropicStream(w, "swe-2-max")
         out.arm()
         time.sleep(1.5)
         out.release()
@@ -882,7 +882,7 @@ class KeepaliveTests(unittest.TestCase):
 
     def test_a_fast_turn_is_untouched(self):
         w = self.Sock()
-        out = devinx.AnthropicStream(w, "swe-2-max")
+        out = ccproxy.AnthropicStream(w, "swe-2-max")
         out.arm()
         out.start()
         out.text("bonjour")
@@ -917,14 +917,14 @@ class HoldTests(unittest.TestCase):
                 yield None, errors[len(calls) - 1]
                 return
             yield self.Msg("ok"), None
-            yield self.Msg(stop=devinx.STOP_END_TURN if hasattr(devinx, "STOP_END_TURN") else 1), None
+            yield self.Msg(stop=ccproxy.STOP_END_TURN if hasattr(ccproxy, "STOP_END_TURN") else 1), None
 
         body = {"model": "swe-2-max", "stream": stream, "max_tokens": 16,
                 "messages": [{"role": "user", "content": "hi"}]}
         sock = KeepaliveTests.Sock()
-        with mock.patch.object(devinx, "chat_stream", fake), \
-             mock.patch.object(devinx.time, "sleep", lambda s: None):
-            result = devinx.run_swe(body, sock if stream else None)
+        with mock.patch.object(ccproxy, "chat_stream", fake), \
+             mock.patch.object(ccproxy.time, "sleep", lambda s: None):
+            result = ccproxy.run_swe(body, sock if stream else None)
         return calls, result, sock.buf.decode()
 
     OUTAGE = ("upstream trailer error: unimplemented: The third-party model "
@@ -941,13 +941,13 @@ class HoldTests(unittest.TestCase):
         # A hold longer than the keepalive interval opens the response with a
         # message_start before any content. That must not switch retrying off.
         started = []
-        real_start = devinx.AnthropicStream.start
+        real_start = ccproxy.AnthropicStream.start
 
         def start_early(self, usage=None):
             started.append(1)
             return real_start(self, usage)
 
-        with mock.patch.object(devinx.AnthropicStream, "arm",
+        with mock.patch.object(ccproxy.AnthropicStream, "arm",
                                lambda self: self.start()):
             calls, (_, err), wire = self._run([self.OUTAGE, self.OUTAGE])
         self.assertEqual(len(calls), 3, "retry stopped once the stream was open")
@@ -956,7 +956,7 @@ class HoldTests(unittest.TestCase):
 
     def test_the_wait_budget_covers_the_long_blocks(self):
         # Blocks of up to 35 minutes were announced on 2026-09-23.
-        self.assertGreaterEqual(devinx.RATE_WAIT_BUDGET, 1800)
+        self.assertGreaterEqual(ccproxy.RATE_WAIT_BUDGET, 1800)
 
 
 class SummaryNeverAbandonedTests(unittest.TestCase):
@@ -995,12 +995,12 @@ class SummaryNeverAbandonedTests(unittest.TestCase):
         def claim(avoid=None):
             return claims.pop(0) if claims else (acct, 0.0)
 
-        with mock.patch.object(devinx, "chat_stream", fake), \
-             mock.patch.object(devinx, "build_request", lambda b, **k: (None, None)), \
-             mock.patch.object(devinx, "claim_account", claim), \
-             mock.patch.object(devinx, "block_account", lambda a, s: None), \
-             mock.patch.object(devinx.time, "sleep", lambda s: None):
-            out = devinx.summarise_turns(self.TURNS, "swe-2-max", "sys", **kw)
+        with mock.patch.object(ccproxy, "chat_stream", fake), \
+             mock.patch.object(ccproxy, "build_request", lambda b, **k: (None, None)), \
+             mock.patch.object(ccproxy, "claim_account", claim), \
+             mock.patch.object(ccproxy, "block_account", lambda a, s: None), \
+             mock.patch.object(ccproxy.time, "sleep", lambda s: None):
+            out = ccproxy.summarise_turns(self.TURNS, "swe-2-max", "sys", **kw)
         return out, calls
 
     def test_every_credential_refusing_is_waited_out(self):
@@ -1023,13 +1023,13 @@ class SummaryNeverAbandonedTests(unittest.TestCase):
         self.assertEqual(out, "SUMMARY")
 
     def test_a_spent_budget_gives_a_record_not_nothing(self):
-        with mock.patch.object(devinx, "RATE_WAIT_BUDGET", 0):
+        with mock.patch.object(ccproxy, "RATE_WAIT_BUDGET", 0):
             out, _ = self._run([])
         self.assertIn("Mechanical record", out)
         self.assertIn("/src/app.py", out, "the record lost what was done")
 
     def test_the_fold_keeps_its_summary_rather_than_a_record(self):
-        with mock.patch.object(devinx, "RATE_WAIT_BUDGET", 0):
+        with mock.patch.object(ccproxy, "RATE_WAIT_BUDGET", 0):
             out, _ = self._run([], never_empty=False)
         self.assertIsNone(out)
 
@@ -1038,11 +1038,11 @@ class SummaryNeverAbandonedTests(unittest.TestCase):
 
         def once(piece, model, system, previous, deadline):
             seen.append(len(piece))
-            return devinx._TOO_LONG if len(piece) > 1 else f"S{len(seen)}"
+            return ccproxy._TOO_LONG if len(piece) > 1 else f"S{len(seen)}"
 
         turns = self.TURNS * 2
-        with mock.patch.object(devinx, "_summarise_once", once):
-            out = devinx.summarise_turns(turns, "swe-2-max", "sys")
+        with mock.patch.object(ccproxy, "_summarise_once", once):
+            out = ccproxy.summarise_turns(turns, "swe-2-max", "sys")
         self.assertNotIn("Mechanical record", out)
         self.assertEqual(sum(1 for n in seen if n == 1), len(turns),
                          "some turns were never summarised")
@@ -1055,9 +1055,9 @@ class CredentialRescanTests(unittest.TestCase):
         self.dir = tempfile.mkdtemp()
         self.addCleanup(__import__("shutil").rmtree, self.dir, True)
         for patcher in (
-            mock.patch.object(devinx, "_accounts", []),
-            mock.patch.object(devinx, "_scan", {"at": 0.0, "sig": None}),
-            mock.patch.object(devinx, "_credential_files", self._files),
+            mock.patch.object(ccproxy, "_accounts", []),
+            mock.patch.object(ccproxy, "_scan", {"at": 0.0, "sig": None}),
+            mock.patch.object(ccproxy, "_credential_files", self._files),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -1073,34 +1073,34 @@ class CredentialRescanTests(unittest.TestCase):
             fh.write(f'windsurf_api_key = "{key}"\n')
 
     def _rescan(self):
-        devinx._scan["at"] = 0.0          # skip the 30s interval
-        return [a["name"] for a in devinx.accounts()]
+        ccproxy._scan["at"] = 0.0          # skip the 30s interval
+        return [a["name"] for a in ccproxy.accounts()]
 
     def test_a_new_login_joins_without_a_restart(self):
         self._login("first", "k1")
-        self.assertEqual([a["name"] for a in devinx.accounts()], ["first"])
+        self.assertEqual([a["name"] for a in ccproxy.accounts()], ["first"])
         self._login("second", "k2")
         self.assertEqual(self._rescan(), ["first", "second"])
 
     def test_a_known_account_keeps_its_block(self):
         self._login("first", "k1")
-        devinx.accounts()[0]["blocked_until"] = 9e18
+        ccproxy.accounts()[0]["blocked_until"] = 9e18
         self._login("second", "k2")
         self._rescan()
-        first = [a for a in devinx.accounts() if a["name"] == "first"][0]
+        first = [a for a in ccproxy.accounts() if a["name"] == "first"][0]
         self.assertEqual(first["blocked_until"], 9e18,
                          "a rescan unblocked a rate-limited credential")
 
     def test_a_removed_login_leaves(self):
         self._login("first", "k1")
         self._login("second", "k2")
-        devinx.accounts()
+        ccproxy.accounts()
         os.remove(os.path.join(self.dir, "second", "devin", "credentials.toml"))
         self.assertEqual(self._rescan(), ["first"])
 
     def test_losing_every_file_keeps_the_accounts(self):
         self._login("first", "k1")
-        devinx.accounts()
+        ccproxy.accounts()
         os.remove(os.path.join(self.dir, "first", "devin", "credentials.toml"))
         self.assertEqual(self._rescan(), ["first"],
                          "a failed read left the service with no account")
@@ -1122,35 +1122,35 @@ class FreePlanExclusionTests(unittest.TestCase):
         self.free = {"name": "free", "key": "k2", "blocked_until": 0.0,
                      "path": os.path.join(self.dir, "credentials.toml")}
         open(self.free["path"], "w").write('windsurf_api_key = "k2"\n')
-        for patcher in (mock.patch.object(devinx, "_accounts", [self.paid, self.free]),
-                        mock.patch.object(devinx, "_maybe_rescan", lambda: None)):
+        for patcher in (mock.patch.object(ccproxy, "_accounts", [self.paid, self.free]),
+                        mock.patch.object(ccproxy, "_maybe_rescan", lambda: None)):
             patcher.start()
             self.addCleanup(patcher.stop)
 
     def test_pro_false_excludes_and_it_is_never_claimed(self):
-        devinx._check_plan(self.free, self._jwt({"pro": False,
+        ccproxy._check_plan(self.free, self._jwt({"pro": False,
                                                  "teams_tier": "TEAMS_TIER_FREE"}))
         self.assertIn("gratuit", self.free["excluded"])
         for _ in range(6):
-            acct, _ = devinx.claim_account()
+            acct, _ = ccproxy.claim_account()
             self.assertIs(acct, self.paid, "an excluded credential was picked")
 
     def test_a_paid_or_unreadable_token_excludes_nothing(self):
-        devinx._check_plan(self.free, self._jwt({"pro": True,
+        ccproxy._check_plan(self.free, self._jwt({"pro": True,
                                                  "teams_tier": "TEAMS_TIER_DEVIN_PRO"}))
-        devinx._check_plan(self.free, "not-a-jwt")
-        devinx._check_plan(self.free, self._jwt({"teams_tier": "X"}))
+        ccproxy._check_plan(self.free, "not-a-jwt")
+        ccproxy._check_plan(self.free, self._jwt({"teams_tier": "X"}))
         self.assertNotIn("excluded", self.free)
 
     def test_every_credential_excluded_means_no_wait(self):
         for a in (self.paid, self.free):
-            devinx._check_plan(a, self._jwt({"pro": False}))
-        self.assertEqual(devinx.claim_account(), (None, None))
+            ccproxy._check_plan(a, self._jwt({"pro": False}))
+        self.assertEqual(ccproxy.claim_account(), (None, None))
         with self.assertRaises(RuntimeError):
-            devinx._first_usable()
+            ccproxy._first_usable()
 
     def test_logging_in_again_brings_it_back(self):
-        devinx._check_plan(self.free, self._jwt({"pro": False}))
+        ccproxy._check_plan(self.free, self._jwt({"pro": False}))
         # A new `devin auth login` rewrites the file.
         time.sleep(0.01)
         with open(self.free["path"], "w") as fh:
@@ -1158,15 +1158,15 @@ class FreePlanExclusionTests(unittest.TestCase):
         os.utime(self.free["path"], (time.time() + 5, time.time() + 5))
         # _maybe_rescan is stubbed in setUp; call the real one directly.
         real = type(self).real_rescan
-        with mock.patch.object(devinx, "_scan", {"at": 0.0, "sig": None}), \
-             mock.patch.object(devinx, "_load_accounts",
+        with mock.patch.object(ccproxy, "_scan", {"at": 0.0, "sig": None}), \
+             mock.patch.object(ccproxy, "_load_accounts",
                                lambda: [dict(self.paid), dict(self.free)]), \
-             mock.patch.object(devinx, "_credential_signature", lambda: ("new",)):
+             mock.patch.object(ccproxy, "_credential_signature", lambda: ("new",)):
             real()
         self.assertNotIn("excluded", self.free, "re-login did not restore it")
 
 
-FreePlanExclusionTests.real_rescan = staticmethod(devinx._maybe_rescan)
+FreePlanExclusionTests.real_rescan = staticmethod(ccproxy._maybe_rescan)
 
 
 class BalancingTests(unittest.TestCase):
@@ -1175,13 +1175,13 @@ class BalancingTests(unittest.TestCase):
     def setUp(self):
         self.a = {"name": "a", "key": "ka", "blocked_until": 0.0}
         self.b = {"name": "b", "key": "kb", "blocked_until": 0.0}
-        for patcher in (mock.patch.object(devinx, "_accounts", [self.a, self.b]),
-                        mock.patch.object(devinx, "_maybe_rescan", lambda: None)):
+        for patcher in (mock.patch.object(ccproxy, "_accounts", [self.a, self.b]),
+                        mock.patch.object(ccproxy, "_maybe_rescan", lambda: None)):
             patcher.start()
             self.addCleanup(patcher.stop)
 
     def _picks(self, n=100):
-        return [devinx.claim_account()[0]["name"] for _ in range(n)]
+        return [ccproxy.claim_account()[0]["name"] for _ in range(n)]
 
     def _history(self, acct, attempts, refusals, reset=600):
         now = time.time()
@@ -1202,21 +1202,21 @@ class BalancingTests(unittest.TestCase):
     def test_some_refusals_mean_somewhat_less_not_nothing(self):
         self._history(self.a, 100, 10)       # a refused one time in ten
         self._history(self.b, 100, 0)
-        share = devinx.shares()["a"]
+        share = ccproxy.shares()["a"]
         self.assertGreater(share, 0.40, "one refusal in ten starved the account")
         self.assertLess(share, 0.50, "the refusing account was not eased off")
 
     def test_mostly_refused_keeps_a_sliver(self):
         self._history(self.a, 100, 95)
         self._history(self.b, 100, 0)
-        share = devinx.shares()["a"]
+        share = ccproxy.shares()["a"]
         self.assertGreater(share, 0.0, "a refusing account got nothing — it can never recover")
         self.assertLess(share, 0.15)
 
     def test_the_picker_follows_the_shares(self):
         self._history(self.a, 100, 50)        # a serves about half
         self._history(self.b, 100, 0)
-        expected = devinx.shares()["a"]
+        expected = ccproxy.shares()["a"]
         got = self._picks(30).count("a") / 30
         self.assertAlmostEqual(got, expected, delta=0.1)
 
@@ -1226,7 +1226,7 @@ class BalancingTests(unittest.TestCase):
         self._history(self.b, 100, 0)
         self.a["refusals"] = collections.deque((now - 300, 60) for _ in range(20))
         self.b["refusals"] = collections.deque((now - 300, 1800) for _ in range(20))
-        sh = devinx.shares(now)
+        sh = ccproxy.shares(now)
         self.assertGreater(sh["a"], sh["b"],
                            "a 60s reset weighed as long as a 30 min one")
 
@@ -1237,17 +1237,17 @@ class BalancingTests(unittest.TestCase):
         # b was locked for 24 minutes, and came back five minutes ago.
         self.b["refusals"] = collections.deque(
             (now - 29 * 60, 1440, now - 300) for _ in range(5))
-        self.assertGreater(devinx.shares(now)["b"], 0.4)
+        self.assertGreater(ccproxy.shares(now)["b"], 0.4)
 
     def test_no_account_takes_more_than_the_cap_while_others_serve(self):
         c = {"name": "c", "key": "kc", "blocked_until": 0.0}
         self._history(self.a, 100, 60)
         self._history(self.b, 100, 60)
         self._history(c, 100, 0)
-        with mock.patch.object(devinx, "_accounts", [self.a, self.b, c]):
-            sh = devinx.shares()
-            self.assertLessEqual(sh["c"], devinx.MAX_SHARE + 1e-9)
-            picks = [devinx.claim_account()[0]["name"] for _ in range(100)]
+        with mock.patch.object(ccproxy, "_accounts", [self.a, self.b, c]):
+            sh = ccproxy.shares()
+            self.assertLessEqual(sh["c"], ccproxy.MAX_SHARE + 1e-9)
+            picks = [ccproxy.claim_account()[0]["name"] for _ in range(100)]
         self.assertLessEqual(picks.count("c"), 52)
 
     def test_the_cap_does_not_hold_back_the_last_account_standing(self):
@@ -1273,26 +1273,26 @@ class MessageIdTests(unittest.TestCase):
     """
 
     def test_every_response_gets_its_own_id(self):
-        ids = {devinx.new_message_id() for _ in range(1000)}
+        ids = {ccproxy.new_message_id() for _ in range(1000)}
         self.assertEqual(len(ids), 1000)
         self.assertTrue(all(i.startswith("msg_") for i in ids))
-        self.assertNotIn("msg_devinx", ids)
+        self.assertNotIn("msg_ccproxy", ids)
 
     def test_no_constant_id_is_left_on_a_response(self):
         src = io.open(os.path.join(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__))), "devinx.py"), encoding="utf-8").read()
+            os.path.abspath(__file__))), "ccproxy.py"), encoding="utf-8").read()
         # The Responses path builds per-item ids and is a different contract;
         # the Messages responses must never carry a literal.
-        self.assertNotIn('"id": "msg_devinx"', src)
-        self.assertNotIn("'id': 'msg_devinx'", src)
+        self.assertNotIn('"id": "msg_ccproxy"', src)
+        self.assertNotIn("'id': 'msg_ccproxy'", src)
         # The Codex route correlates streamed pieces by item id the same way,
         # so no literal may survive there either.
-        for literal in ('msg_devinx_', 'call_devinx_', 'resp_devinx'):
+        for literal in ('msg_ccproxy_', 'call_ccproxy_', 'resp_ccproxy'):
             self.assertNotIn(literal, src, f"{literal} is still a constant")
 
     def test_two_codex_streams_do_not_share_item_ids(self):
-        a = devinx.ResponsesStream(io.BytesIO(), "swe-2-max")
-        b = devinx.ResponsesStream(io.BytesIO(), "swe-2-max")
+        a = ccproxy.ResponsesStream(io.BytesIO(), "swe-2-max")
+        b = ccproxy.ResponsesStream(io.BytesIO(), "swe-2-max")
         self.assertNotEqual(a.item_prefix, b.item_prefix)
         self.assertNotEqual(a.response_id, b.response_id)
 

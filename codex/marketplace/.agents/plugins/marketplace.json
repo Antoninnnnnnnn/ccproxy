@@ -1,6 +1,6 @@
 {
-  "name": "devinx",
-  "interface": { "displayName": "devinx" },
+  "name": "ccproxy",
+  "interface": { "displayName": "ccproxy" },
   "plugins": [
     {
       "name": "swe-orchestrator",

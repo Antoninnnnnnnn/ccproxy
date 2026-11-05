@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build, install and run the claude-code-proxy sidecar for devinx's gpt-* route.
+"""Build, install and run the claude-code-proxy sidecar for ccproxy's gpt-* route.
 
     python3 sidecar/build.py [--dest PATH] [--port 18765] [--no-service]
                              [--restart] [--force]
@@ -63,7 +63,7 @@ def cache_dir():
         base = os.path.expanduser("~/Library/Caches")
     else:
         base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    return os.path.join(base, "devinx", f"claude-code-proxy-{VERSION}")
+    return os.path.join(base, "ccproxy", f"claude-code-proxy-{VERSION}")
 
 
 def find_cargo():
@@ -245,8 +245,8 @@ def main(argv=None):
     ap.add_argument("--dest", default=default_dest(),
                     help="where to install the binary")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT,
-                    help="sidecar port (devinx expects 18765 unless "
-                         "DEVINX_GPT_UPSTREAM says otherwise)")
+                    help="sidecar port (ccproxy expects 18765 unless "
+                         "CCPROXY_GPT_UPSTREAM says otherwise)")
     ap.add_argument("--src", default=cache_dir(), help="build checkout")
     ap.add_argument("--no-service", action="store_true",
                     help="install the binary only")

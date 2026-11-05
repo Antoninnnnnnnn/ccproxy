@@ -20,7 +20,7 @@ def read_service(host, port):
         if len(raw) > 65536:
             return 'invalid_response', {}
         data = json.loads(raw)
-        if not isinstance(data, dict) or data.get('service') != 'devinx':
+        if not isinstance(data, dict) or data.get('service') != 'ccproxy':
             return 'foreign', {}
         public = {key: data[key] for key in ('service', 'build', 'pid', 'port', 'inflight')
                   if key in data and isinstance(data[key], (str, int, float, type(None)))}
@@ -38,23 +38,23 @@ def read_service(host, port):
 
 
 def parse_config_value(name, raw):
-    """Parse one DEVINX_* runtime setting the way the service itself does.
+    """Parse one CCPROXY_* runtime setting the way the service itself does.
 
     Shared so a value is judged the same way whether it is being validated
     before the service starts (launcher.py), or compared against what an
     already-running service reports (below, and --status/--explain). Raises
     ValueError on a value the service would also reject.
     """
-    if name == 'DEVINX_COMPACT_STRICT':
+    if name == 'CCPROXY_COMPACT_STRICT':
         return raw == '1'
     value = float(raw)
-    if name == 'DEVINX_RELAY_READ_TIMEOUT' and value == 0:
+    if name == 'CCPROXY_RELAY_READ_TIMEOUT' and value == 0:
         return None
     return value
 
 
 def configuration_mismatches(env, service_config):
-    """Requested DEVINX_* settings that differ from a running service's own.
+    """Requested CCPROXY_* settings that differ from a running service's own.
 
     Session flags never reconfigure a daemon that is already up - changing a
     variable in a new terminal silently does nothing unless this is said out
@@ -79,11 +79,11 @@ def configuration_mismatches(env, service_config):
                 f'{name} differs from the running service; session flags do not reconfigure a daemon.')
     # The two switches that outlive the shell that set them. Reported as
     # booleans only; a service too old to report them says nothing here.
-    for name in ('DEVINX_DUMP', 'DEVINX_ALLOW_BROWSER'):
+    for name in ('CCPROXY_DUMP', 'CCPROXY_ALLOW_BROWSER'):
         running = (service_config or {}).get(name)
         if not isinstance(running, bool):
             continue
-        wanted = bool(env.get(name)) if name == 'DEVINX_DUMP' else env.get(name) == '1'
+        wanted = bool(env.get(name)) if name == 'CCPROXY_DUMP' else env.get(name) == '1'
         if running and not wanted:
             warnings.append(
                 f'{name} is active in the running service (inherited from the shell that started it); '
@@ -94,7 +94,7 @@ def configuration_mismatches(env, service_config):
 
 
 def requested_configuration(env):
-    """Parsed DEVINX_* settings the given environment is asking for.
+    """Parsed CCPROXY_* settings the given environment is asking for.
 
     An entry that fails to parse is left out here; configuration_mismatches()
     reports that separately, so a bad value is never silently reported as
@@ -141,7 +141,7 @@ def collect(mode, args, launcher):
             'orchestrator_enabled': use_orch,
             'agents': [name for name, _ in launcher.CODEX_ROLES] if use_codex and use_orch
                       else list(launcher.packaged_agents()) if use_devin and not use_codex else [],
-            'permissions': 'No permission bypass is added by devinx.',
+            'permissions': 'No permission bypass is added by ccproxy.',
         }
     return report
 
@@ -155,7 +155,7 @@ def main(mode, args, launcher):
     if as_json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
-        print(f"devinx: {report['state']}; local build {report['expected_build']}")
+        print(f"ccproxy: {report['state']}; local build {report['expected_build']}")
         for key, value in report.items():
             if key not in ('state', 'expected_build', 'warnings'):
                 print(f'{key}: {json.dumps(value, sort_keys=True)}')

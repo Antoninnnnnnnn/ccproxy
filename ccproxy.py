@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""devinx — one local service for Claude Code with native SWE-2 subagents.
+"""ccproxy — one local service for Claude Code with native SWE-2 subagents.
 
 Listens on 127.0.0.1:8316 and speaks the Anthropic Messages API. Requests are
 routed on the model name:
@@ -44,6 +44,7 @@ import threading
 import time
 import uuid
 from datetime import datetime
+import runtime_support
 from runtime_support import CONFIG_FIELDS, PortLock, build_id, hello_proof, service_secret, swe_enabled
 import kimi
 from http.cookiejar import DefaultCookiePolicy
@@ -67,7 +68,7 @@ from google.protobuf import source_context_pb2, api_pb2
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOST = "127.0.0.1"
-PORT = int(os.environ.get("DEVINX_PORT", "8316"))
+PORT = int(os.environ.get("CCPROXY_PORT", "8316"))
 
 CLAUDE_UPSTREAM = "https://api.anthropic.com"
 # Where Codex CLI sends its own traffic when authenticated with a ChatGPT
@@ -82,7 +83,7 @@ COGNITION_UPSTREAM = "https://server.codeium.com"
 # to a local claude-code-proxy (raine/claude-code-proxy) that holds its own
 # ChatGPT login and does the Messages <-> Codex Responses translation. Codex's
 # own gpt-* traffic arrives on /v1/responses and never comes here.
-GPT_UPSTREAM = os.environ.get("DEVINX_GPT_UPSTREAM", "http://127.0.0.1:18765")
+GPT_UPSTREAM = os.environ.get("CCPROXY_GPT_UPSTREAM", "http://127.0.0.1:18765")
 GPT_MODELS = (
     # Current ChatGPT lineup only; Sol is 6.1 (~/.codex/models_cache.json).
     ("gpt-6.1-sol", "GPT-6.1 Sol (ChatGPT)"),
@@ -100,8 +101,8 @@ GPT_CONTEXT_TOKENS = {
 # Codex's own rule (ModelInfo::auto_compact_token_limit): compact at 90% of
 # each model's raw window, measured with server-reported token counts.
 # An explicit override still applies to every GPT subagent.
-GPT_COMPACT_AT = (int(os.environ["DEVINX_GPT_COMPACT_AT"])
-                  if "DEVINX_GPT_COMPACT_AT" in os.environ else None)
+GPT_COMPACT_AT = (int(os.environ["CCPROXY_GPT_COMPACT_AT"])
+                  if "CCPROXY_GPT_COMPACT_AT" in os.environ else None)
 # What the server last reported for each GPT subagent conversation, as
 # key -> (client message count, reported tokens, estimate of what was sent,
 # whether what was sent was compacted). Codex decides on the last reported
@@ -165,7 +166,7 @@ MULTI_AGENT_SURFACE = "v1"
 # was found, on subagents that never compacted at all. Advertised per model in
 # /v1/models so a client that reads the catalog can size each model on its own,
 # rather than taking one session-wide number for every model it talks to.
-SWE_CONTEXT_TOKENS = int(os.environ.get("DEVINX_CONTEXT_TOKENS", str(256 * 1024)))
+SWE_CONTEXT_TOKENS = int(os.environ.get("CCPROXY_CONTEXT_TOKENS", str(256 * 1024)))
 SWE_EFFORTS = ("low", "medium", "high", "xhigh")
 
 # Cognition issues tool call ids like `read_file_0#6bd71a46…`, and Anthropic
@@ -190,7 +191,7 @@ def safe_tool_id(tid):
 
 
 def repair_tool_ids(body):
-    """Rewrite tool ids a previous devinx wrote into a transcript.
+    """Rewrite tool ids a previous ccproxy wrote into a transcript.
 
     The relay is a passthrough and stays one for every request that does not
     need this: the body is only re-serialised when something actually changed.
@@ -225,7 +226,7 @@ def repair_tool_ids(body):
 # that ran a turn on gpt-* would stay refused on claude-* until /clear.
 FOREIGN_SIGNATURE_PREFIX = "ccp:"
 # Thinking another upstream signed: GPT through the sidecar (ccp:) and Kimi,
-# whose signatures devinx tags on the way out (see kimi.SIGNATURE_PREFIX).
+# whose signatures ccproxy tags on the way out (see kimi.SIGNATURE_PREFIX).
 FOREIGN_SIGNATURE_PREFIXES = (FOREIGN_SIGNATURE_PREFIX, kimi.SIGNATURE_PREFIX)
 
 
@@ -258,7 +259,7 @@ def gpt_error(status, text, body):
     overflow it can read two numbers out of (see anthropic_error).
     """
     if status == 401:
-        return (503, "api_error", "devinx GPT sidecar is not logged in to "
+        return (503, "api_error", "ccproxy GPT sidecar is not logged in to "
                 "ChatGPT: run `claude-code-proxy codex auth login`")
     if status == 413 and "context" in text.lower():
         return (400, "invalid_request_error",
@@ -308,16 +309,16 @@ def kimi_status():
 # ("No such tool available: advisor"). So this proxy runs it: the advisor tool
 # call never reaches the client, a GPT model (Sol by default) is asked for the
 # advice, and the turn continues upstream with the advice as the tool's result.
-GPT_ADVISOR_MODEL = os.environ.get("DEVINX_ADVISOR_MODEL", "gpt-6.1-sol")
-GPT_ADVISOR_EFFORT = os.environ.get("DEVINX_ADVISOR_EFFORT", "high")
+GPT_ADVISOR_MODEL = os.environ.get("CCPROXY_ADVISOR_MODEL", "gpt-6.1-sol")
+GPT_ADVISOR_EFFORT = os.environ.get("CCPROXY_ADVISOR_EFFORT", "high")
 # Off by default (0): the tool is then taken out of a gpt-* request, so the
 # model is never offered an advisor nobody would run. Set it to turn the
 # feature on. Advice runs one call at a time inside a single client request;
 # past the cap the tool is taken out of the request so a model that keeps
 # asking cannot hold the turn open for ever.
-GPT_ADVISOR_MAX_CALLS = int(os.environ.get("DEVINX_ADVISOR_MAX_CALLS", "0"))
-GPT_ADVISOR_TIMEOUT = float(os.environ.get("DEVINX_ADVISOR_TIMEOUT", "300"))
-GPT_ADVISOR_TOKENS = int(os.environ.get("DEVINX_ADVISOR_TOKENS", "16384"))
+GPT_ADVISOR_MAX_CALLS = int(os.environ.get("CCPROXY_ADVISOR_MAX_CALLS", "0"))
+GPT_ADVISOR_TIMEOUT = float(os.environ.get("CCPROXY_ADVISOR_TIMEOUT", "300"))
+GPT_ADVISOR_TOKENS = int(os.environ.get("CCPROXY_ADVISOR_TOKENS", "16384"))
 GPT_ADVISOR_SYSTEM = (
     "You are an advisor: a stronger reviewer that a coding agent consults in "
     "the middle of a task. You see the task and everything the agent has done "
@@ -754,7 +755,7 @@ SIGNATURE_TYPE = "sealed"
 
 # Generous enough for a long history with images, bounded so a malformed or
 # hostile content-length cannot make the process allocate without limit.
-MAX_BODY_BYTES = int(os.environ.get("DEVINX_MAX_BODY", str(128 * 1024 * 1024)))
+MAX_BODY_BYTES = int(os.environ.get("CCPROXY_MAX_BODY", str(128 * 1024 * 1024)))
 
 REQUEST_EXCLUDED = {
     "connection", "content-length", "host", "proxy-authorization",
@@ -769,16 +770,9 @@ RESPONSE_EXCLUDED = {
 
 
 def data_dir():
-    """Per-OS writable location for the Devin credential and runtime state."""
-    if os.environ.get("DEVINX_DATA"):
-        return os.path.normpath(os.environ["DEVINX_DATA"])
-    if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    elif sys.platform == "darwin":
-        base = os.path.expanduser("~/Library/Application Support")
-    else:
-        base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
-    return os.path.normpath(os.path.join(base, "devinx"))
+    """Per-OS writable location for credentials, logs and runtime state; the
+    old devinx directory until it has been moved (runtime_support)."""
+    return runtime_support.data_dir()
 
 
 DATA_DIR = data_dir()
@@ -793,8 +787,8 @@ _STARTED = time.time()
 # and its lock are already the successor's — so a long drain costs a
 # lingering process and nothing else, and it is what lets a launcher replace
 # a busy service instead of leaving old code running until a quiet moment.
-DRAIN_SECONDS = int(os.environ.get("DEVINX_DRAIN", "2400"))
-STATS_TTL = float(os.environ.get("DEVINX_STATS_TTL", "5"))
+DRAIN_SECONDS = int(os.environ.get("CCPROXY_DRAIN", "2400"))
+STATS_TTL = float(os.environ.get("CCPROXY_STATS_TTL", "5"))
 # Reading the dashboard from anywhere but loopback costs this secret. Empty
 # means loopback only, which is the safe default for a service that never
 # expected to be reachable from outside the machine.
@@ -806,7 +800,7 @@ def _dashboard_token():
     environment disappears on the next restart, and with it the published
     dashboard. On disk it survives.
     """
-    env = os.environ.get("DEVINX_DASHBOARD_TOKEN", "")
+    env = os.environ.get("CCPROXY_DASHBOARD_TOKEN", "")
     if env:
         return env
     try:
@@ -819,11 +813,11 @@ def _dashboard_token():
 DASHBOARD_TOKEN = _dashboard_token()
 # The port the dashboard is published on, separate from the API port on
 # purpose. Opened whenever there is a token to protect it.
-DASHBOARD_PORT = int(os.environ.get("DEVINX_DASHBOARD_PORT", "8317"))
+DASHBOARD_PORT = int(os.environ.get("CCPROXY_DASHBOARD_PORT", "8317"))
 # How many times one conversation may be told the mid-conversation system
 # turns are not accepted before the proxy gives up and carries them anyway. A
 # client that honours the contract needs one.
-MID_CONV_SYSTEM_REFUSALS = int(os.environ.get("DEVINX_MID_CONV_REFUSALS", "3"))
+MID_CONV_SYSTEM_REFUSALS = int(os.environ.get("CCPROXY_MID_CONV_REFUSALS", "3"))
 _capability_lock = threading.Lock()
 _capability_refusals = {}
 
@@ -842,7 +836,7 @@ def _log_tail(n):
     The same file the extractor reads, override included: a feed and a figure
     panel drawn from two different logs would quietly disagree.
     """
-    path = os.environ.get("DEVINX_LOG", os.path.join(DATA_DIR, "devinx.log"))
+    path = os.environ.get("CCPROXY_LOG", os.path.join(DATA_DIR, "ccproxy.log"))
     try:
         size = os.path.getsize(path)
         with open(path, "rb") as fh:
@@ -876,8 +870,8 @@ def _build_id():
 
 
 RISKY_FLAGS = {
-    "DEVINX_DUMP": lambda: bool(os.environ.get("DEVINX_DUMP")),
-    "DEVINX_ALLOW_BROWSER": lambda: os.environ.get("DEVINX_ALLOW_BROWSER") == "1",
+    "CCPROXY_DUMP": lambda: bool(os.environ.get("CCPROXY_DUMP")),
+    "CCPROXY_ALLOW_BROWSER": lambda: os.environ.get("CCPROXY_ALLOW_BROWSER") == "1",
 }
 
 
@@ -907,11 +901,11 @@ _request_local = threading.local()
 # launched them was answered 503. MAX_INFLIGHT covers everything that is not a
 # SWE-2 turn — relays, count_tokens, bodies still being read — and
 # MAX_SWE_INFLIGHT the SWE-2 turns. 0 disables either.
-MAX_INFLIGHT = int(os.environ.get("DEVINX_MAX_INFLIGHT", "64"))
-MAX_SWE_INFLIGHT = int(os.environ.get("DEVINX_MAX_SWE_INFLIGHT", "64"))
-HTTP_READ_TIMEOUT = float(os.environ.get("DEVINX_HTTP_READ_TIMEOUT", "30"))
-CLIENT_WRITE_TIMEOUT = float(os.environ.get("DEVINX_CLIENT_WRITE_TIMEOUT", "120"))
-RELAY_READ_TIMEOUT = float(os.environ.get("DEVINX_RELAY_READ_TIMEOUT", "0")) or None
+MAX_INFLIGHT = int(os.environ.get("CCPROXY_MAX_INFLIGHT", "64"))
+MAX_SWE_INFLIGHT = int(os.environ.get("CCPROXY_MAX_SWE_INFLIGHT", "64"))
+HTTP_READ_TIMEOUT = float(os.environ.get("CCPROXY_HTTP_READ_TIMEOUT", "30"))
+CLIENT_WRITE_TIMEOUT = float(os.environ.get("CCPROXY_CLIENT_WRITE_TIMEOUT", "120"))
+RELAY_READ_TIMEOUT = float(os.environ.get("CCPROXY_RELAY_READ_TIMEOUT", "0")) or None
 
 
 def _request_phase(phase, model=None):
@@ -1106,8 +1100,8 @@ def current_turn():
 def descriptor_files():
     """Locate the extracted Cognition FileDescriptorProtos."""
     candidates = []
-    if os.environ.get("DEVINX_DESCRIPTORS"):
-        candidates.append(os.environ["DEVINX_DESCRIPTORS"])
+    if os.environ.get("CCPROXY_DESCRIPTORS"):
+        candidates.append(os.environ["CCPROXY_DESCRIPTORS"])
     candidates += [os.path.join(HERE, "descriptors"), HERE,
                    os.path.expanduser("~/devin-shim")]
     for d in candidates:
@@ -1248,7 +1242,7 @@ def _read_key(path):
 # Every credentials.toml sits in a directory called "devin", so naming an
 # account after its parent names them all the same and the log stops telling
 # them apart — which is the whole reason the account is logged.
-_GENERIC_DIRS = {"devin", "data", "share", ".local", "devinx", ""}
+_GENERIC_DIRS = {"devin", "data", "share", ".local", "ccproxy", "devinx", ""}
 
 
 def _credential_name(path):
@@ -1270,7 +1264,7 @@ def _load_accounts():
     design.
     """
     keys, names, paths = [], [], []
-    env = os.environ.get("DEVINX_API_KEYS") or os.environ.get("DEVINX_API_KEY")
+    env = os.environ.get("CCPROXY_API_KEYS") or os.environ.get("CCPROXY_API_KEY")
     if env:
         for i, raw in enumerate(re.split(r"[,\n]", env)):
             raw = raw.strip()
@@ -1352,7 +1346,7 @@ def _check_plan(acct, jwt):
         if claims.get("pro") is False and not acct.get("excluded"):
             acct["excluded"] = f"plan gratuit ({tier})"
             acct["excluded_mtime"] = _mtime(acct.get("path"))
-            print(f"devinx: credential {acct['name']} is on a free plan "
+            print(f"ccproxy: credential {acct['name']} is on a free plan "
                   f"(pro=false, {tier}); excluded until it is logged in again",
                   flush=True)
 
@@ -1374,10 +1368,10 @@ _accounts = []
 # done while the service runs is picked up within this many seconds, with no
 # restart: the service is meant to outlive the sessions that use it, and a new
 # account is exactly the kind of change that should not need one.
-RESCAN_EVERY = float(os.environ.get("DEVINX_RESCAN", "30"))
+RESCAN_EVERY = float(os.environ.get("CCPROXY_RESCAN", "30"))
 _scan = {"at": 0.0, "sig": None}
 # The Kimi Code accounts, read from <data dir>/kimi/*.key (or
-# DEVINX_KIMI_KEYS) on first use and rescanned like the Devin credentials.
+# CCPROXY_KIMI_KEYS) on first use and rescanned like the Devin credentials.
 KIMI_POOL = kimi.Pool(DATA_DIR, RESCAN_EVERY)
 RELAYED_SSE = {"claude", "gpt", "kimi"}
 
@@ -1401,7 +1395,7 @@ def _maybe_rescan():
     nothing, so a moment of filesystem trouble cannot leave the service with no
     account.
     """
-    if os.environ.get("DEVINX_API_KEYS") or os.environ.get("DEVINX_API_KEY"):
+    if os.environ.get("CCPROXY_API_KEYS") or os.environ.get("CCPROXY_API_KEY"):
         return
     now = time.time()
     with _acct_lock:
@@ -1416,7 +1410,7 @@ def _maybe_rescan():
     try:
         fresh = _load_accounts()
     except Exception as e:
-        print(f"devinx: credential rescan failed, keeping the current ones: {e}",
+        print(f"ccproxy: credential rescan failed, keeping the current ones: {e}",
               flush=True)
         return
     back = []
@@ -1437,12 +1431,12 @@ def _maybe_rescan():
                 back.append(a)
         names = ", ".join(a["name"] for a in _accounts)
     for a in back:
-        print(f"devinx: credential {a['name']} logged in again; back in "
+        print(f"ccproxy: credential {a['name']} logged in again; back in "
               f"rotation, plan re-read on next use", flush=True)
     for a in added:
-        print(f"devinx: new Devin credential {a['name']} ({names})", flush=True)
+        print(f"ccproxy: new Devin credential {a['name']} ({names})", flush=True)
     for a in removed:
-        print(f"devinx: Devin credential {a['name']} removed ({names})", flush=True)
+        print(f"ccproxy: Devin credential {a['name']} removed ({names})", flush=True)
 
 
 def accounts():
@@ -1458,7 +1452,7 @@ def accounts():
             _accounts.extend(_load_accounts())
             _scan["at"], _scan["sig"] = time.time(), _credential_signature()
             if len(_accounts) > 1:
-                print(f"devinx: {len(_accounts)} Devin credentials "
+                print(f"ccproxy: {len(_accounts)} Devin credentials "
                       f"({', '.join(a['name'] for a in _accounts)})", flush=True)
         return list(_accounts)
 
@@ -1488,7 +1482,7 @@ def reset_key():
     except RuntimeError as e:
         # Nothing readable right now (a login mid-write, say): keep what is in
         # use rather than leave nothing to use at all.
-        print(f"devinx: credential reload found nothing ({e}); keeping the "
+        print(f"ccproxy: credential reload found nothing ({e}); keeping the "
               f"current ones", flush=True)
         return
     fresh_keys = {a["key"] for a in fresh}
@@ -1512,7 +1506,7 @@ def reset_key():
         changed = {a["key"] for a in merged} != set(by_key)
         _accounts[:] = merged
     if changed:
-        print(f"devinx: credentials reloaded "
+        print(f"ccproxy: credentials reloaded "
               f"({', '.join(a['name'] for a in merged)})", flush=True)
 
 
@@ -1523,9 +1517,9 @@ _turn = {"n": 0}
 # A refusal's memory is not a setting at all: it is the reset the upstream
 # announced in that refusal, so "reset in 20 seconds" is forgotten in about a
 # minute and "reset in 30 minutes" weighs for about half an hour.
-SUCCESS_MEMORY = float(os.environ.get("DEVINX_SUCCESS_MEMORY", "900"))
+SUCCESS_MEMORY = float(os.environ.get("CCPROXY_SUCCESS_MEMORY", "900"))
 # How long a refusal still weighs once its block is over, in seconds.
-REFUSAL_AFTERGLOW = float(os.environ.get("DEVINX_REFUSAL_AFTERGLOW", "120"))
+REFUSAL_AFTERGLOW = float(os.environ.get("CCPROXY_REFUSAL_AFTERGLOW", "120"))
 
 
 def _success_rate(acct, now):
@@ -1574,7 +1568,7 @@ def _success_rate(acct, now):
 # appear to remember days of volume, not minutes, so spreading the load is
 # what keeps every account usable. Applies among three or more usable
 # accounts; when the others are blocked, the ones left take everything.
-MAX_SHARE = float(os.environ.get("DEVINX_MAX_SHARE", "0.5"))
+MAX_SHARE = float(os.environ.get("CCPROXY_MAX_SHARE", "0.5"))
 
 
 def _capped(weights):
@@ -2056,7 +2050,7 @@ def _msgid(kind, payload):
     for the whole remaining conversation.
     """
     blob = json.dumps(payload, sort_keys=True, default=str)
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, "devinx-msg\0" + kind + "\0" + blob))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, "ccproxy-msg\0" + kind + "\0" + blob))
 
 
 # Cognition's input classifier rejects some long tool descriptions outright —
@@ -2079,9 +2073,9 @@ TOOL_DESC_CAPS = (None, 6000, 2500)
 # 10 to 35 minutes once an account had carried a heavy day, and 64 turns were
 # handed back as errors after waiting the full ten. A held turn is a paused
 # agent; a handed-back turn is usually a dead one.
-RATE_WAIT_BUDGET = int(os.environ.get("DEVINX_RATE_WAIT", "1800"))
+RATE_WAIT_BUDGET = int(os.environ.get("CCPROXY_RATE_WAIT", "1800"))
 # The shortest a refused credential is left alone, whatever the upstream says.
-RATE_FLOOR = float(os.environ.get("DEVINX_RATE_FLOOR", "3"))
+RATE_FLOOR = float(os.environ.get("CCPROXY_RATE_FLOOR", "3"))
 # The upstream's own words when the model behind it is down, as opposed to
 # refusing this account. Switching credential cannot help; waiting can.
 _OUTAGE = ("experiencing issues", "currently not available",
@@ -2092,11 +2086,11 @@ _OUTAGE = ("experiencing issues", "currently not available",
 # "The response stopped arriving". Measured here: 158 turns ended that way, at a
 # median latency of 343s. Anthropic's own API keeps a stream alive with `ping`
 # events; nothing here did. 0 disables it.
-KEEPALIVE_EVERY = int(os.environ.get("DEVINX_KEEPALIVE", "25"))
+KEEPALIVE_EVERY = int(os.environ.get("CCPROXY_KEEPALIVE", "25"))
 # How many turns may be in flight on a credential that has refused something
 # recently, and for how long after that refusal the cap applies. 0 disables it.
-PACE_CONCURRENCY = int(os.environ.get("DEVINX_PACE", "4"))
-PACE_WINDOW = int(os.environ.get("DEVINX_PACE_WINDOW", "120"))
+PACE_CONCURRENCY = int(os.environ.get("CCPROXY_PACE", "4"))
+PACE_WINDOW = int(os.environ.get("CCPROXY_PACE_WINDOW", "120"))
 
 # A connection that breaks mid-response is transient and costs an agent its
 # turn: measured in one log, 103 of them — connection resets and streams ending
@@ -2104,7 +2098,7 @@ PACE_WINDOW = int(os.environ.get("DEVINX_PACE_WINDOW", "120"))
 # caught rate limits and classifier refusals. urllib3's own retries cannot help
 # here: with stream=True the window closes once the response headers are read,
 # so a body-phase failure surfaces to us and to nobody else.
-NETWORK_RETRIES = int(os.environ.get("DEVINX_NETWORK_RETRIES", "2"))
+NETWORK_RETRIES = int(os.environ.get("CCPROXY_NETWORK_RETRIES", "2"))
 _TRANSIENT = ("ConnectionResetError", "ChunkedEncodingError", "ConnectionError",
               "ReadTimeout", "ProtocolError", "IncompleteRead",
               "stream truncated")
@@ -2118,7 +2112,7 @@ def build_request(body, tool_desc_cap=None):
     regrouping needed.
     """
     conv_seed = _conv_key(body)
-    cascade_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "devinx\0" + conv_seed))
+    cascade_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "ccproxy\0" + conv_seed))
     prompts = []
 
     seen_ids = {}
@@ -2300,7 +2294,7 @@ def build_request(body, tool_desc_cap=None):
     # then n_assistant_turns+1.
     n_asst = sum(1 for p in prompts if p.get("source") == SRC_SYSTEM)
     req.trajectory_reference.trajectory_id = str(
-        uuid.uuid5(uuid.NAMESPACE_URL, "devinx-traj\0" + conv_seed))
+        uuid.uuid5(uuid.NAMESPACE_URL, "ccproxy-traj\0" + conv_seed))
     req.trajectory_reference.trajectory_type = 4
     if any(p.get("source") == SRC_TOOL for p in prompts):
         req.trajectory_reference.step_type = 0
@@ -2311,9 +2305,9 @@ def build_request(body, tool_desc_cap=None):
     return req, model
 
 
-MAX_FRAME_BYTES = int(os.environ.get("DEVINX_MAX_FRAME", str(16 * 1024 * 1024)))
+MAX_FRAME_BYTES = int(os.environ.get("CCPROXY_MAX_FRAME", str(16 * 1024 * 1024)))
 MAX_INFLATED_FRAME_BYTES = int(os.environ.get(
-    "DEVINX_MAX_INFLATED_FRAME", str(64 * 1024 * 1024)))
+    "CCPROXY_MAX_INFLATED_FRAME", str(64 * 1024 * 1024)))
 
 
 def _frame_payload(payload, compressed):
@@ -2489,7 +2483,7 @@ def chat_stream(req, acct=None, purpose="turn"):
 # alone and only what goes upstream is reduced, which the agent experiences as a
 # turn that took a few seconds longer rather than as the end of its task.
 COMPACT_AT = int(os.environ.get(
-    "DEVINX_COMPACT_AT", str(int(SWE_CONTEXT_TOKENS * 0.82))))
+    "CCPROXY_COMPACT_AT", str(int(SWE_CONTEXT_TOKENS * 0.82))))
 # How much of the budget the verbatim tail may keep. The rest leaves room for
 # the summary, the system prompt and the answer.
 COMPACT_TAIL = 0.45
@@ -2537,7 +2531,7 @@ _summaries = {}
 # each other's.
 SUMMARIES_PER_KEY = 4
 _summary_flights = {}
-COMPACT_STRICT = os.environ.get("DEVINX_COMPACT_STRICT") == "1"
+COMPACT_STRICT = os.environ.get("CCPROXY_COMPACT_STRICT") == "1"
 
 
 class CompactionUnavailable(RuntimeError):
@@ -2626,7 +2620,7 @@ def _summary_body(messages, model, system, previous):
         # Room for the model to think *and* answer. At 4096 it was spending the
         # whole budget reasoning and emitting no text at all: 12 of the first
         # 21 summary calls came back with zero characters.
-        "max_tokens": int(os.environ.get("DEVINX_SUMMARY_TOKENS", "16384")),
+        "max_tokens": int(os.environ.get("CCPROXY_SUMMARY_TOKENS", "16384")),
         "system": "You are summarising a coding agent's conversation so it can "
                   "continue working after its context was compacted.",
         "messages": [{"role": "user", "content": [{"type": "text", "text":
@@ -2998,7 +2992,7 @@ def summarise_turns(messages, model, system, previous=None, never_empty=True,
 FLAT_RUN = 32
 # Past this, the blocks that led into a collapsed run are too big to sit on one
 # turn, and the replayed thinking among them gives way to the text.
-LEAD_CAP = int(os.environ.get("DEVINX_LEAD_CAP", "8000"))
+LEAD_CAP = int(os.environ.get("CCPROXY_LEAD_CAP", "8000"))
 
 
 def _is_flattened(messages):
@@ -4554,8 +4548,8 @@ def _stats_pass(key, window, slot):
         r = subprocess.run(
             [sys.executable, os.path.join(HERE, "tools", "log_stats.py")] + window,
             capture_output=True, text=True, timeout=60,
-            env=dict(os.environ, DEVINX_LOG=os.environ.get(
-                "DEVINX_LOG", os.path.join(DATA_DIR, "devinx.log"))))
+            env=dict(os.environ, CCPROXY_LOG=os.environ.get(
+                "CCPROXY_LOG", os.path.join(DATA_DIR, "ccproxy.log"))))
         data = json.loads(r.stdout) if r.returncode == 0 else None
         if data is None:
             err = (r.stderr or "stats failed").strip()[:200]
@@ -4645,10 +4639,10 @@ class Handler(BaseHTTPRequestHandler):
         Browsers attach Origin to such a request and ordinary API clients do not,
         so refusing it costs nothing. Host is checked too: under DNS rebinding
         the address resolves to loopback while Host still carries the attacker's
-        domain. Set DEVINX_ALLOW_BROWSER=1 if you are deliberately calling this
+        domain. Set CCPROXY_ALLOW_BROWSER=1 if you are deliberately calling this
         from a local web UI.
         """
-        if os.environ.get("DEVINX_ALLOW_BROWSER") == "1":
+        if os.environ.get("CCPROXY_ALLOW_BROWSER") == "1":
             return False
         if self.headers.get("origin"):
             return True
@@ -4706,7 +4700,7 @@ class Handler(BaseHTTPRequestHandler):
 
         The upstream catalog is fetched with the caller's own credential and
         merged, so the GPT model the root runs on keeps its real metadata and
-        stays selectable; without that merge, pointing Codex at devinx would
+        stays selectable; without that merge, pointing Codex at ccproxy would
         hide every model the account actually has. A fetch that fails degrades
         to the SWE-2 rows alone rather than failing the request.
         """
@@ -4870,7 +4864,7 @@ class Handler(BaseHTTPRequestHandler):
         as five messages with every call in one of them.
 
         It does not have to be carried at all. The client publishes a contract
-        for gateways — devinx is one — and it says a capability the upstream
+        for gateways — ccproxy is one — and it says a capability the upstream
         will not take should come back as HTTP 400 whose entire error.message
         is the token `capability_rejected: <class>`. The client matches that
         token, drops the capability, retries, and sticky-rejects it for the
@@ -4941,7 +4935,7 @@ class Handler(BaseHTTPRequestHandler):
         if urlsplit(self.path).path == "/api/hello":
             with _inflight_lock:
                 busy = _inflight["n"]
-            hello = {"service": "devinx", "build": BUILD,
+            hello = {"service": "ccproxy", "build": BUILD,
                      "pid": os.getpid(), "port": PORT, "inflight": busy,
                      "configuration": effective_configuration()}
             # The answer to the launcher's challenge: proof that this process
@@ -4966,7 +4960,7 @@ class Handler(BaseHTTPRequestHandler):
         models = [{"type": "model", "id": mid, "display_name": name,
                    "created_at": "2026-01-01T00:00:00Z",
                    "object": "model", "created": 1767225600,
-                   "owned_by": "devinx",
+                   "owned_by": "ccproxy",
                    # Both spellings: a client reads runtime.max_input_tokens
                    # first and falls back to context_window.
                    "context_window": SWE_CONTEXT_TOKENS,
@@ -4976,7 +4970,7 @@ class Handler(BaseHTTPRequestHandler):
         models += [{"type": "model", "id": mid, "display_name": name,
                     "created_at": "2026-01-01T00:00:00Z",
                     "object": "model", "created": 1767225600,
-                    "owned_by": "devinx",
+                    "owned_by": "ccproxy",
                     "context_window": gpt_context_tokens(mid),
                     "runtime": {"max_input_tokens": gpt_context_tokens(mid),
                                 "max_output_tokens": 128000}}
@@ -4985,7 +4979,7 @@ class Handler(BaseHTTPRequestHandler):
             models += [{"type": "model", "id": mid, "display_name": f"Kimi {label}",
                         "created_at": "2026-01-01T00:00:00Z",
                         "object": "model", "created": 1767225600,
-                        "owned_by": "devinx",
+                        "owned_by": "ccproxy",
                         "context_window": window,
                         "runtime": {"max_input_tokens": window,
                                     "max_output_tokens": 128000}}
@@ -5047,11 +5041,11 @@ class Handler(BaseHTTPRequestHandler):
                                  "Body must be a JSON object")
             return
 
-        if os.environ.get("DEVINX_DUMP"):
+        if os.environ.get("CCPROXY_DUMP"):
             # Diagnostic only: writes the verbatim request, which includes the
             # full conversation. Never leave this on outside an investigation.
             try:
-                with open(f"{os.environ['DEVINX_DUMP']}.{time.time_ns()}.json",
+                with open(f"{os.environ['CCPROXY_DUMP']}.{time.time_ns()}.json",
                           "wb") as fh:
                     fh.write(raw)
             except OSError:
@@ -5069,7 +5063,7 @@ class Handler(BaseHTTPRequestHandler):
             # branch covers messages, count_tokens and /v1/responses.
             self.send_error_json(
                 403, "permission_error",
-                "SWE-2 access is disabled on this devinx (DEVINX_SWE=1 "
+                "SWE-2 access is disabled on this ccproxy (CCPROXY_SWE=1 "
                 "re-enables it); use a claude-* or gpt-* model")
             return
         if model in SWE_MODEL_IDS and self.browser_origin():
@@ -5118,7 +5112,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if model.startswith(kimi.PREFIX):
-            # Spends a Kimi key devinx holds: the same rule as SWE-2 and GPT.
+            # Spends a Kimi key ccproxy holds: the same rule as SWE-2 and GPT.
             if self.browser_origin():
                 self.send_error_json(
                     403, "permission_error",
@@ -5297,7 +5291,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
     def serve_kimi(self, body, model, path):
-        """Relay a Claude Code kimi-* turn to Kimi Code with a key devinx holds.
+        """Relay a Claude Code kimi-* turn to Kimi Code with a key ccproxy holds.
 
         Kimi speaks Messages natively, so the body goes nearly as it came:
         the model id, the effort level and Kimi's own signatures are put back
@@ -5321,7 +5315,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not accounts:
             self.send_error_json(503, "api_error",
-                                 "devinx has no Kimi account: run `devinx --kimi-add`")
+                                 "ccproxy has no Kimi account: run `ccproxy --kimi-add`")
             return
         agent = (path == "/v1/messages"
                  and bool(self.headers.get("x-claude-code-agent-id")))
@@ -5355,8 +5349,8 @@ class Handler(BaseHTTPRequestHandler):
                 if wait is None:
                     status, kind, message, wait = (
                         503, "api_error",
-                        "every Kimi key devinx holds was refused: replace it "
-                        "with `devinx --kimi-add <name>`", None)
+                        "every Kimi key ccproxy holds was refused: replace it "
+                        "with `ccproxy --kimi-add <name>`", None)
                 else:
                     status, kind, message = (
                         429, "rate_limit_error",
@@ -5488,7 +5482,7 @@ class Handler(BaseHTTPRequestHandler):
                         self.send_header("connection", "close")
                         self.end_headers()
                         committed = True
-                    self.wfile.write(b": devinx compacting\n\n")
+                    self.wfile.write(b": ccproxy compacting\n\n")
                     self.wfile.flush()
                 except OSError:
                     turn.gone.set()
@@ -5770,7 +5764,7 @@ class Handler(BaseHTTPRequestHandler):
             turn.check()
             if (worker.is_alive() and KEEPALIVE_EVERY > 0
                     and time.time() - last >= KEEPALIVE_EVERY):
-                emit(b": devinx advising\n\n")
+                emit(b": ccproxy advising\n\n")
                 last = time.time()
         advice, ok = result["advice"]
         print(f"advisor: model={GPT_ADVISOR_MODEL} ok={ok} chars={len(advice)}",
@@ -5983,9 +5977,9 @@ class Handler(BaseHTTPRequestHandler):
             # upstream stream is the only authoritative description of the event
             # vocabulary a given client version actually consumes.
             tap = None
-            if os.environ.get("DEVINX_DUMP") and self.command != "HEAD":
+            if os.environ.get("CCPROXY_DUMP") and self.command != "HEAD":
                 try:
-                    tap = open(f"{os.environ['DEVINX_DUMP']}.{label}-resp."
+                    tap = open(f"{os.environ['CCPROXY_DUMP']}.{label}-resp."
                                f"{time.time_ns()}.sse", "wb")
                 except OSError:
                     tap = None
@@ -6219,7 +6213,7 @@ class Server(ThreadingHTTPServer):
         ThreadingHTTPServer.handle_error(self, request, client_address)
 
     # One listener per port, enforced by PortLock rather than shared through
-    # SO_REUSEPORT. SO_REUSEPORT let a second devinx bind beside the first and
+    # SO_REUSEPORT. SO_REUSEPORT let a second ccproxy bind beside the first and
     # the kernel then spread connections between them; a deploy no longer
     # needs it, because the old process closes its listener and releases the
     # lock before it drains, so the new one binds a free port. On Windows the
@@ -6273,7 +6267,7 @@ def drain_and_exit(srv, extra_servers=(), on_closed=None):
             time.sleep(0.05)
         with _inflight_lock:
             busy = _inflight["n"]
-        print("devinx: draining complete, exiting"
+        print("ccproxy: draining complete, exiting"
               + (f" with {busy} turn(s) still in flight after "
                  f"{DRAIN_SECONDS}s" if busy else ""), flush=True)
         os._exit(0)
@@ -6283,7 +6277,7 @@ def drain_and_exit(srv, extra_servers=(), on_closed=None):
         if requested:
             return
         requested = True
-        threading.Thread(target=drain, name="devinx-drain", daemon=False).start()
+        threading.Thread(target=drain, name="ccproxy-drain", daemon=False).start()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
@@ -6323,7 +6317,7 @@ class DashboardHandler(Handler):
 def serve_dashboard_port(port):
     """The dashboard on its own port, for a tailnet or funnel mount."""
     if not DASHBOARD_TOKEN:
-        print(f"dashboard port {port} not opened: DEVINX_DASHBOARD_TOKEN is "
+        print(f"dashboard port {port} not opened: CCPROXY_DASHBOARD_TOKEN is "
               f"unset, and an unauthenticated port is not worth publishing",
               flush=True)
         return
@@ -6368,12 +6362,12 @@ if __name__ == "__main__":
     sys.stderr = _Stamped(sys.stderr)
     _port_lock = PortLock(PORT)
     if not _port_lock.acquire(wait=15):
-        print(f"devinx: another devinx is already listening on port {PORT} "
+        print(f"ccproxy: another ccproxy is already listening on port {PORT} "
               f"(lock {_port_lock.path}); not starting a second one", flush=True)
         sys.exit(1)
     service_secret(DATA_DIR)
     _srv = Server((HOST, PORT), Handler)
-    print(f"devinx listening on http://{HOST}:{PORT}  "
+    print(f"ccproxy listening on http://{HOST}:{PORT}  "
           f"(build {BUILD}, pid {os.getpid()}, data: {DATA_DIR})", flush=True)
     _dashboard_srv = serve_dashboard_port(DASHBOARD_PORT) if DASHBOARD_PORT else None
     if _dashboard_srv is not None:
@@ -6387,9 +6381,9 @@ if __name__ == "__main__":
             window, key = Handler.stats_window(query)
             _stats_slot(key, window)["ready"].wait(120)
     threading.Thread(target=_warm, daemon=True).start()
-    if os.environ.get("DEVINX_DUMP"):
-        print(f"WARNING: DEVINX_DUMP is set. Every request, including the full "
+    if os.environ.get("CCPROXY_DUMP"):
+        print(f"WARNING: CCPROXY_DUMP is set. Every request, including the full "
               f"conversation and any credentials the client sends, is being "
-              f"written verbatim to {os.environ['DEVINX_DUMP']}.*.json",
+              f"written verbatim to {os.environ['CCPROXY_DUMP']}.*.json",
               flush=True)
     _srv.serve_forever()

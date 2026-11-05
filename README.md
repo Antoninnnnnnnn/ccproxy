@@ -1,37 +1,49 @@
-# devinx
+# ccproxy
 
-Your coding agent keeps your own login. Its subagents run on SWE-2.
+Claude Code keeps your own login, and reaches every other model you pay for.
 
-Claude Code and Codex both stay signed in as you. The work they delegate goes to
-Cognition's SWE-2 — Medium, High or Max — through one local service that routes
-on the model name and nothing else.
+One local service routes each request on its model name: `claude-*` to
+Anthropic with your claude.ai login, `gpt-*` to your ChatGPT subscription,
+`kimi-*` to your Kimi Code subscription, `swe-2-*` to Cognition's SWE-2. Any of
+them can be the main session (`/model`) or a subagent, in the same session,
+with the same tools, harness and transcripts. Codex goes through it too.
 
-One port, no external binary, nothing written into your agent's config.
+One port, nothing written into your agent's config.
 
 ```
-   devinx --or                                  devinx --cx --or
+   ccproxy --d                                  ccproxy --cx
    └─ Claude Code                               └─ Codex
       claude.ai login                              ChatGPT login
-            │                                            │
-            └──────────►  devinx.py on :8316  ◄──────────┘
+            │                                           │
+            └─────────►  ccproxy.py on :8316  ◄─────────┘
                                  │
                     routed on the model name
                                  │
          ┌──────────────────┬────┴─────────────┬──────────────────┐
      claude-*            swe-2-*             gpt-*              kimi-*
   api.anthropic.com  server.codeium.com  chatgpt.com/...   api.kimi.com/coding
-      relayed             SWE-2             relayed       relayed, devinx's key
+   your login        a Devin login     sidecar's login     a Kimi Code key
 ```
 
-The subagents are real subagents of the client you launched: same tools, same
-harness, same transcripts. Nothing spawns a second process, and the credential
-for each upstream is the one its own client sent — devinx holds none of them.
+The subagents are real subagents of the client you launched: nothing spawns a
+second process. Claude and Codex traffic is relayed with the credential the
+client itself sent; the other routes use a login ccproxy holds (Devin, Kimi)
+or the GPT sidecar holds, and never see the client's.
 
-> **SWE-2 is switched off by default.** Without `DEVINX_SWE=1` the service
+> **Formerly devinx.** It began as a way to run subagents on Devin's SWE-2 and
+> was renamed when it came to serve several providers. What the old name left
+> on a machine keeps working: `DEVINX_*` variables are read as `CCPROXY_*`
+> (the new name wins when both are set), the data directory moves from
+> `…/devinx` to `…/ccproxy` on first launch (with a link left at the old
+> path on Linux and macOS, and the old directory used as is where it cannot
+> move), and a devinx service still running is replaced when idle. The
+> `--devin`/`--d` flag keeps its name.
+
+> **SWE-2 is switched off by default.** Without `CCPROXY_SWE=1` the service
 > refuses `swe-*` models (403) and neither model catalog lists them, `--devin`
 > offers only `claude-reviewer` and the `gpt-*` agents, `/model` has no SWE-2
 > entry, `--or` and the Codex SWE roles are skipped, and no Devin credential is
-> ever read. Claude and GPT are unaffected. Set `DEVINX_SWE=1` before the
+> ever read. Claude and GPT are unaffected. Set `CCPROXY_SWE=1` before the
 > service starts to bring the SWE-2 layer described below back.
 
 ## Read this first
@@ -40,8 +52,8 @@ This talks to Cognition's private API, not a public one, and it gets there by
 looking like something it is not:
 
 - it identifies itself as the Windsurf IDE (`IDE_NAME`, `IDE_VERSION`,
-  `EXT_VERSION` and a matching user-agent in `devinx.py`);
-- `_SYS_REWRITES` in `devinx.py` rewrites parts of the client's system prompt
+  `EXT_VERSION` and a matching user-agent in `ccproxy.py`);
+- `_SYS_REWRITES` in `ccproxy.py` rewrites parts of the client's system prompt
   for the specific purpose of getting past Cognition's input classifier, which
   otherwise rejects them. That is circumvention of a check the provider put
   there, not a compatibility shim;
@@ -63,7 +75,7 @@ the [Claude Code CLI](https://claude.com/claude-code) or the Codex CLI on PATH.
 python3 install.py
 ```
 
-It creates a virtualenv, installs two dependencies, drops a `devinx` launcher in
+It creates a virtualenv, installs two dependencies, drops a `ccproxy` launcher in
 `~/.local/bin`, and runs a smoke test that ends with a real SWE-2 call.
 
 If you have not logged into Devin on this machine yet, the installer prints the
@@ -91,7 +103,7 @@ same way, as a session-scoped `--plugin-dir`.
 Codex is configured entirely through per-session `-c` overrides, so your
 `config.toml`, plugins and agents are untouched. The one exception is the
 orchestrator skill, which Codex can only load as an installed plugin: the
-installer writes a `devinx.config.toml` **profile** next to your config and
+installer writes a `ccproxy.config.toml` **profile** next to your config and
 materialises the plugin cache. A profile does nothing until it is named, and the
 launcher names it only for `--codex --or`.
 
@@ -100,22 +112,22 @@ launcher names it only for `--codex --or`.
 ### Claude Code
 
 ```sh
-devinx                      # plain Claude Code, exactly as `claude`
-devinx --devin              # with the SWE-2 layer  (--d is a shorthand)
-devinx --or                 # ... and the orchestrator skill; implies --devin
-devinx --d --resume         # composes with any claude flag
-devinx --resume x -p "..."  # flags and prompts pass through untouched
+ccproxy                      # plain Claude Code, exactly as `claude`
+ccproxy --devin              # with the SWE-2 layer  (--d is a shorthand)
+ccproxy --or                 # ... and the orchestrator skill; implies --devin
+ccproxy --d --resume         # composes with any claude flag
+ccproxy --resume x -p "..."  # flags and prompts pass through untouched
 ```
 
-Without a flag, `devinx` is a plain passthrough: nothing is started, nothing is
+Without a flag, `ccproxy` is a plain passthrough: nothing is started, nothing is
 injected, no proxy.
 
 ### Codex
 
 ```sh
-devinx --codex              # Codex through devinx  (--cx is a shorthand)
-devinx --cx --or            # ... with the SWE-2 roles and the orchestrator skill
-devinx --cx exec "..."      # any codex subcommand and flag passes through
+ccproxy --codex              # Codex through ccproxy  (--cx is a shorthand)
+ccproxy --cx --or            # ... with the SWE-2 roles and the orchestrator skill
+ccproxy --cx exec "..."      # any codex subcommand and flag passes through
 ```
 
 `--codex` implies the service, the same way `--devin` does. Your root model is
@@ -125,30 +137,30 @@ whatever your Codex config already says; only what it delegates changes.
 
 | flag | effect |
 |---|---|
-| `--devin`, `--d` | route Claude Code through devinx; inject `claude-reviewer` and the `gpt-*` agents (plus the `swe2-*` agents with `DEVINX_SWE=1`) |
-| `--codex`, `--cx` | route Codex through devinx; pin the SWE-2 roles (with `DEVINX_SWE=1`) |
-| `--or` | add the orchestrator skill; implies the client flag it is used with (needs `DEVINX_SWE=1`; skipped with a warning otherwise) |
-| `--plain` | cancel `DEVINX_ALWAYS=1` for this one run (an explicit `--devin`/`--or`/`--codex` still wins) |
+| `--devin`, `--d` | route Claude Code through ccproxy; inject `claude-reviewer` and the `gpt-*` agents (plus the `swe2-*` agents with `CCPROXY_SWE=1`) |
+| `--codex`, `--cx` | route Codex through ccproxy; pin the SWE-2 roles (with `CCPROXY_SWE=1`) |
+| `--or` | add the orchestrator skill; implies the client flag it is used with (needs `CCPROXY_SWE=1`; skipped with a warning otherwise) |
+| `--plain` | cancel `CCPROXY_ALWAYS=1` for this one run (an explicit `--devin`/`--or`/`--codex` still wins) |
 | `--` | everything after it passes through verbatim |
 | `--kimi-add [name]`, `--kimi-list`, `--kimi-remove name` | manage the Kimi Code accounts (see [Kimi models](#kimi-models-in-claude-code)); nothing is launched |
-| `--status`, `--doctor`, `--explain` | local diagnostics (see [stability controls](docs/stability.md)); recognised in the first position or after devinx's own flags (`devinx --d --status`), as long as the position is unambiguous |
+| `--status`, `--doctor`, `--explain` | local diagnostics (see [stability controls](docs/stability.md)); recognised in the first position or after ccproxy's own flags (`ccproxy --d --status`), as long as the position is unambiguous |
 
 | variable | effect |
 |---|---|
-| `DEVINX_SWE=1` | switch Devin / SWE-2 access on; off by default. Set it before the service starts: a running service keeps the setting it started with |
-| `DEVINX_ALWAYS=1` | make the SWE-2 layer the default |
-| `DEVINX_ORCHESTRATOR=1` | make the orchestrator the default (implies `DEVINX_ALWAYS`) |
-| `DEVINX_SUBAGENT_MCP=1` | give subagents their MCP tools back |
-| `DEVINX_PORT` | change the port for one run |
-| `DEVINX_CONTEXT_TOKENS` | override the context window devinx declares (default 262144) |
-| `DEVINX_ALLOW_BROWSER=1` | accept browser-originated requests (see below) |
-| `DEVINX_DATA` | override the data directory (logs, lock file, Devin credentials); defaults to the platform data dir |
-| `DEVINX_LOG` | override the log file path; defaults to `devinx.log` in the data directory |
-| `DEVINX_API_KEYS` / `DEVINX_API_KEY` | comma-separated Devin credentials (or a single one), instead of every `credentials.toml` under the data directory |
-| `DEVINX_OWNED_PATHS` | `os.pathsep`-separated paths/globs the `--or` hooks enforce as owned files when a subagent's brief declares no `<owned-paths>` block, and for the main thread (see [hooks](#hooks) below); unset means unenforced |
-| `DEVINX_KIMI_KEYS` | comma-separated Kimi Code keys, instead of the files `--kimi-add` writes |
-| `DEVINX_KIMI_COMPACT_AT` | override the Kimi subagent compaction threshold (default 90% of each model's window) |
-| `DEVINX_DESCRIPTORS` | an extra directory of protobuf `*.fdp` descriptors to load, ahead of the packaged ones |
+| `CCPROXY_SWE=1` | switch Devin / SWE-2 access on; off by default. Set it before the service starts: a running service keeps the setting it started with |
+| `CCPROXY_ALWAYS=1` | make the SWE-2 layer the default |
+| `CCPROXY_ORCHESTRATOR=1` | make the orchestrator the default (implies `CCPROXY_ALWAYS`) |
+| `CCPROXY_SUBAGENT_MCP=1` | give subagents their MCP tools back |
+| `CCPROXY_PORT` | change the port for one run |
+| `CCPROXY_CONTEXT_TOKENS` | override the context window ccproxy declares (default 262144) |
+| `CCPROXY_ALLOW_BROWSER=1` | accept browser-originated requests (see below) |
+| `CCPROXY_DATA` | override the data directory (logs, lock file, Devin credentials); defaults to the platform data dir |
+| `CCPROXY_LOG` | override the log file path; defaults to `ccproxy.log` in the data directory |
+| `CCPROXY_API_KEYS` / `CCPROXY_API_KEY` | comma-separated Devin credentials (or a single one), instead of every `credentials.toml` under the data directory |
+| `CCPROXY_OWNED_PATHS` | `os.pathsep`-separated paths/globs the `--or` hooks enforce as owned files when a subagent's brief declares no `<owned-paths>` block, and for the main thread (see [hooks](#hooks) below); unset means unenforced |
+| `CCPROXY_KIMI_KEYS` | comma-separated Kimi Code keys, instead of the files `--kimi-add` writes |
+| `CCPROXY_KIMI_COMPACT_AT` | override the Kimi subagent compaction threshold (default 90% of each model's window) |
+| `CCPROXY_DESCRIPTORS` | an extra directory of protobuf `*.fdp` descriptors to load, ahead of the packaged ones |
 
 `--or` is separate from the client flags on purpose: the SWE-2 layer changes
 which model does the work, the orchestrator changes who decides what the work
@@ -159,17 +171,17 @@ to delegate, so `--devin` alone leaves the skill out entirely.
 `--` is passed through verbatim, so a prompt containing `--devin` is never
 mistaken for the flag.
 
-**devinx never adds `--dangerously-skip-permissions`.** Choosing a model and
+**ccproxy never adds `--dangerously-skip-permissions`.** Choosing a model and
 choosing to run tools unattended are separate decisions; pass the flag yourself
 if you want it. The launcher is deliberately not called `cc`: on Unix that is
 the C compiler, which `make`, autoconf and cgo invoke by name.
 
 Already have your own `cc` wrapper? Add a branch to it rather than using
-`devinx`, and keep whatever flags you already pass:
+`ccproxy`, and keep whatever flags you already pass:
 
 ```sh
---devin|--d) exec ~/devinx/.venv/bin/python ~/devinx/launcher.py --devin "$@" ;;
---or)        exec ~/devinx/.venv/bin/python ~/devinx/launcher.py --or "$@" ;;
+--devin|--d) exec ~/ccproxy/.venv/bin/python ~/ccproxy/launcher.py --devin "$@" ;;
+--or)        exec ~/ccproxy/.venv/bin/python ~/ccproxy/launcher.py --or "$@" ;;
 ```
 
 The service starts on demand the first time and stays up afterwards.
@@ -183,7 +195,7 @@ The trade it is built on is that the two sides are scarce in different ways.
 Your own context is the thing that runs out fastest; SWE-2 is far cheaper but
 not free — it enforces a token budget over a rolling window, and a burst of
 parallel agents empties it, after which calls are refused for one to twelve
-minutes. devinx reports that refusal as a `rate_limit_error` with the wait the
+minutes. ccproxy reports that refusal as a `rate_limit_error` with the wait the
 upstream named, so the client backs off instead of killing the agent.
 
 So execution belongs downstream and judgment stays up top — architecture,
@@ -260,11 +272,11 @@ last, and the bottom half is the half people skip.
 
 ### Invoking it
 
-On Claude Code the skill is `/devinx:swe-orchestrator`; on Codex it is
+On Claude Code the skill is `/ccproxy:swe-orchestrator`; on Codex it is
 `swe-orchestrator`. Both are also picked up on their own when a task matches.
 
 ```text
-/devinx:swe-orchestrator
+/ccproxy:swe-orchestrator
 
 Add rate limiting to the public API.
 Map the current middleware chain before touching anything.
@@ -294,7 +306,7 @@ does Codex, which has no equivalent hook mechanism.
   prompt alone is a request an agent can talk itself out of. Ownership is
   declared per agent, in its brief, as an `<owned-paths>` block (one path or
   glob per line); the hook reads it back from that agent's own transcript, so
-  parallel workers each get their own boundary. `DEVINX_OWNED_PATHS` is the
+  parallel workers each get their own boundary. `CCPROXY_OWNED_PATHS` is the
   session-wide fallback for the main thread and for briefs that declare none.
 
 Both fail open on anything they cannot parse: a hook erroring out must never
@@ -337,12 +349,12 @@ tool stays available, including ones a future release adds, so the agents keep
 inheriting the native tool set.
 
 Only the subagents are affected; your main session keeps its connectors. Set
-`DEVINX_SUBAGENT_MCP=1` to give them back, or pass `--strict-mcp-config` to drop
+`CCPROXY_SUBAGENT_MCP=1` to give them back, or pass `--strict-mcp-config` to drop
 MCP for the whole session instead.
 
 ## How it works
 
-`devinx.py` listens on 127.0.0.1:8316 and routes on the model name. That single
+`ccproxy.py` listens on 127.0.0.1:8316 and routes on the model name. That single
 decision is what makes the whole thing possible, and the Codex section below is
 the story of why.
 
@@ -407,7 +419,7 @@ Claude Code one in `plugin/skills/`.
 
 `gpt-*` sent by **Claude Code** (on `/v1/messages`) goes to a local
 [claude-code-proxy](https://github.com/raine/claude-code-proxy) sidecar on
-`127.0.0.1:18765` (`DEVINX_GPT_UPSTREAM` to change it), which holds its own
+`127.0.0.1:18765` (`CCPROXY_GPT_UPSTREAM` to change it), which holds its own
 ChatGPT login and translates Messages to Codex Responses. Claude Code's
 Anthropic credential is stripped before the hop. Codex's own `gpt-*` traffic
 still goes straight to chatgpt.com on `/v1/responses`.
@@ -442,12 +454,12 @@ keep 272k, compacting at 244800.
   behind it the sidecar's Codex-native compaction (`CCP_CODEX_SERVER_COMPACTION`)
   keeps the earlier history in model-native form.
 - Subagents (`x-claude-code-agent-id`), which Claude Code never compacts:
-  devinx does, with the same machinery as SWE-2 but a summariser that runs on
+  ccproxy does, with the same machinery as SWE-2 but a summariser that runs on
   the agent's own GPT model through the sidecar, so nothing goes to Cognition.
   The trigger is the server's last reported usage plus an estimate of what was
   added since, as in Codex. A summary that takes long keeps the stream alive
   with SSE comments; a context refusal is retried once, compacted harder,
-  instead of ending the agent. `DEVINX_GPT_COMPACT_AT` overrides the subagent
+  instead of ending the agent. `CCPROXY_GPT_COMPACT_AT` overrides the subagent
   compaction threshold for every GPT model.
 
 **Streaming failures.** On the Claude and GPT Messages routes, an HTTP 200
@@ -474,7 +486,7 @@ answers `No such tool available: advisor`). Claude Code offers the tool to a
 GPT model when it treats it as an Opus (the launcher's picker rows say
 `behavesAs: claude-opus-5-5`) or when `CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1`
 is set, in a GPT main session and in a `gpt-*` subagent of a Claude one alike.
-Then devinx answers the call itself: the tool call is held back, a GPT model (`gpt-6.1-sol`) is given the
+Then ccproxy answers the call itself: the tool call is held back, a GPT model (`gpt-6.1-sol`) is given the
 task and the transcript and asked for advice, and the turn continues upstream
 with that advice as the tool's result, as one continuous message. The client
 sees the `server_tool_use` / `advisor_tool_result` pair Claude's own advisor
@@ -491,16 +503,16 @@ The advisor's own calls travel under a cache key derived from the session
 keeps state for): successive advice read ~97% of their transcript from the
 cache instead of paying for all of it each time. The advisor tool stays in the
 request until a call is refused, because the tools head the prompt and changing
-them re-reads the whole history. `DEVINX_ADVISOR_MODEL` (default `gpt-6.1-sol`), `DEVINX_ADVISOR_EFFORT`
-(`high`), `DEVINX_ADVISOR_MAX_CALLS` (0 by default, which turns the feature off and
+them re-reads the whole history. `CCPROXY_ADVISOR_MODEL` (default `gpt-6.1-sol`), `CCPROXY_ADVISOR_EFFORT`
+(`high`), `CCPROXY_ADVISOR_MAX_CALLS` (0 by default, which turns the feature off and
 takes the tool out of every gpt-* request; set 3, say, to turn it on, after
-which that many advice per client request are given and the tool is withdrawn), `DEVINX_ADVISOR_TIMEOUT` (300s).
+which that many advice per client request are given and the tool is withdrawn), `CCPROXY_ADVISOR_TIMEOUT` (300s).
 
 **Report files.** Claude Code tells every subagent "Do NOT Write
 report/summary/findings/analysis .md files", and a GPT model obeys it even when
 the task asks for exactly such a file under a path it names (two subagents
 answered that a generic rule forbade it and sent their findings as messages).
-On the gpt-* route (subagents only), devinx narrows that sentence to
+On the gpt-* route (subagents only), ccproxy narrows that sentence to
 unrequested reports: a file the launching agent asks for, or a path it names,
 is the deliverable and gets written. The `gpt-*` subagents' own prompt says the
 same, for a client that bypasses the rewrite. Claude's own route is relayed
@@ -515,7 +527,7 @@ The sidecar is a patched build: upstream claude-code-proxy (0.1.43) accepts
 browser-originated requests and any `Host`, so a page could spend the ChatGPT
 quota. The patch in `sidecar/origin-guard.patch` refuses any `Origin` and any
 non-loopback `Host`. Upstream's `install.sh` and brew install the unpatched
-binary, so build it with devinx instead (needs Rust, via rustup):
+binary, so build it with ccproxy instead (needs Rust, via rustup):
 
     python3 install.py --gpt        # or, on its own: python3 sidecar/build.py
     ~/.local/bin/claude-code-proxy codex auth login   # once, the sidecar's own login
@@ -534,18 +546,18 @@ A Kimi Code subscription comes with an API key (`sk-kimi-...`, the one its CLI
 logs in with) for `api.kimi.com/coding`, which speaks the Messages API natively:
 thinking with signatures, tool use, deferred tools, prompt caching,
 `count_tokens`. So `kimi-*` is relayed rather than translated, with a key
-devinx holds in place of the client's own credential — Claude Code's claude.ai
+ccproxy holds in place of the client's own credential — Claude Code's claude.ai
 token never leaves for Moonshot.
 
 ```sh
-devinx --kimi-add            # prompts for the key, checks it with Kimi, saves it
-devinx --kimi-add work       # a second account, under its own name
-devinx --kimi-list           # each account and its 5-hour and monthly usage
-devinx --kimi-remove work
+ccproxy --kimi-add            # prompts for the key, checks it with Kimi, saves it
+ccproxy --kimi-add work       # a second account, under its own name
+ccproxy --kimi-list           # each account and its 5-hour and monthly usage
+ccproxy --kimi-remove work
 ```
 
 Keys live in `<data dir>/kimi/<name>.key` (mode 0600), one account per file,
-and the running service picks a new one up within 30 seconds; `DEVINX_KIMI_KEYS`
+and the running service picks a new one up within 30 seconds; `CCPROXY_KIMI_KEYS`
 replaces the files. While at least one account is saved, `/model` lists
 **Kimi K3.1 Pro** (`kimi-k3.1-pro`), **K3**, **K2.8** (`kimi-for-coding`) and
 **K3.1 Pro Fast** (`kimi-k3.1-pro-highspeed`, twice the quota), and the
@@ -553,7 +565,7 @@ subagents `kimi-{pro,k3}-{low,high,max}` are injected beside the `gpt-*` ones.
 Any other id of Kimi's catalog works as `kimi-<id>` (`/model kimi-k3-256k`).
 
 - **Ids are checked.** Kimi answers 200 for any model name, running its
-  default model instead, so a typo would go unnoticed: devinx refuses a
+  default model instead, so a typo would go unnoticed: ccproxy refuses a
   `kimi-*` id that is neither in its table nor in Kimi's live catalog.
 - **Effort.** Kimi reasons at low, high and max; the slider's medium goes to
   high and xhigh to max. `thinking: disabled` is dropped, since K3.1 Pro
@@ -567,7 +579,7 @@ Any other id of Kimi's catalog works as `kimi-<id>` (`/model kimi-k3-256k`).
 - **What Kimi refuses.** Claude Code announces a tool loaded mid-conversation
   with a `tool_addition` block in a `{role: "system"}` turn, and Kimi rejects
   the whole request over it ("Invalid request Error") while it takes the turn's
-  text; devinx drops the block, the tool being in `tools` already. The advisor
+  text; ccproxy drops the block, the tool being in `tools` already. The advisor
   server tool is taken out, since nobody would run it.
 - **Accounts.** Turns go round robin, least recently used first. A refusal
   for quota (429) blocks that account until its window resets — from
@@ -577,9 +589,9 @@ Any other id of Kimi's catalog works as `kimi-<id>` (`/model kimi-k3-256k`).
   With every account spent the client gets a 429 `rate_limit_error` with
   `retry-after`: a 5-hour window is not something to hold a turn through.
 - **Context.** Kimi refuses an overflow with the limit and not the size
-  ("Your request exceeded k3-256k model token limit: 262144"); devinx rewrites
+  ("Your request exceeded k3-256k model token limit: 262144"); ccproxy rewrites
   it as `prompt is too long: N tokens > M maximum`. Subagents are compacted by
-  devinx at 90% of the window like GPT ones, with the summary written by Kimi
+  ccproxy at 90% of the window like GPT ones, with the summary written by Kimi
   through whichever account is free, and a context refusal is retried once,
   compacted harder. The main session compacts itself at the same point
   (`autoCompactWindow` per model).
@@ -596,7 +608,7 @@ otherwise POST to it, since a JSON body sent as `text/plain` needs no CORS
 preflight and the attacker never has to read the reply. Browsers send `Origin`
 on such a request and API clients do not.
 
-Set `DEVINX_ALLOW_BROWSER=1` if you are deliberately driving it from a local web
+Set `CCPROXY_ALLOW_BROWSER=1` if you are deliberately driving it from a local web
 UI. This is not isolation between users of the machine: anything running as you
 can still reach the port.
 
@@ -607,16 +619,16 @@ http://127.0.0.1:8316/dashboard
 ```
 
 Publishing it — a tailnet mount, a funnel, any reverse proxy — means pointing
-that forwarder at `DEVINX_DASHBOARD_PORT` (8317 by default), never at the API
+that forwarder at `CCPROXY_DASHBOARD_PORT` (8317 by default), never at the API
 port. The forwarder publishes every route that answers on the port it is given,
 `/v1/messages` included, and it rewrites `Host` to `127.0.0.1` on the way
 through, so the guard that refuses a non-loopback Host sees a local call and
 waves it past. No header survives that. The dashboard port answers only
 `/dashboard`, `/api/stats` and `/api/hello`, and opens only when a token exists
-— from `DEVINX_DASHBOARD_TOKEN`, or from `dashboard-token` in the data
+— from `CCPROXY_DASHBOARD_TOKEN`, or from `dashboard-token` in the data
 directory so it survives a restart the launcher does.
 
-Set `DEVINX_DASHBOARD_TOKEN` and the dashboard becomes `…/dashboard?k=<token>`, for every
+Set `CCPROXY_DASHBOARD_TOKEN` and the dashboard becomes `…/dashboard?k=<token>`, for every
 caller including loopback: judging by the `Host` header stops a rebound browser
 and nothing else, since any forwarder — `socat`, `ssh -L`, a tailnet mount —
 delivers its connections from `127.0.0.1` with whatever `Host` the client chose.
@@ -634,7 +646,7 @@ so several open tabs cost one pass.
 
 ## Local diagnostics and stability controls
 
-`devinx --status`, `devinx --doctor --json`, and `devinx --explain --cx --or`
+`ccproxy --status`, `ccproxy --doctor --json`, and `ccproxy --explain --cx --or`
 inspect the running service without starting it or spending inference quota.
 The dashboard also shows current requests and their phase. See
 [stability controls and validation](docs/stability.md) for the new resource
@@ -642,9 +654,9 @@ bounds, opt-in strict compaction, shutdown behaviour, test coverage and limits.
 
 ## Troubleshooting
 
-Logs are in `devinx.log`, in the data directory printed by the installer
-(`%LOCALAPPDATA%\devinx`, `~/Library/Application Support/devinx`, or
-`$XDG_DATA_HOME/devinx`). Each request logs a line: `route=swe`, `route=claude`
+Logs are in `ccproxy.log`, in the data directory printed by the installer
+(`%LOCALAPPDATA%\ccproxy`, `~/Library/Application Support/ccproxy`, or
+`$XDG_DATA_HOME/ccproxy`). Each request logs a line: `route=swe`, `route=claude`
 or `route=codex`, with the model and the status.
 
 **SWE-2 calls fail, the rest still works.** Expected when the Devin credential
@@ -653,7 +665,7 @@ unaffected. Log in again with the command above; the running service drops its
 cached credential when the upstream rejects it, so it picks the new one up
 without a restart.
 
-**The launcher reports the service failed to start.** Read `devinx.log`. A port
+**The launcher reports the service failed to start.** Read `ccproxy.log`. A port
 conflict on 8316 is the usual cause; `--port` at install time changes it.
 
 **After a pull, is the running service the new code?** It is checked for you.
@@ -671,7 +683,7 @@ agents empties it — measured on one machine, 1107 refusals against 8598
 successful turns, in bursts of up to 133 in a row, each naming a wait of one to
 twelve minutes.
 
-devinx now holds the turn instead of handing the refusal back: it waits the
+ccproxy now holds the turn instead of handing the refusal back: it waits the
 delay the upstream named, with jitter so a fan-out of agents does not all return
 together and empty the window again, then retries. The client sees a request
 that took longer; the agent never stops, and the orchestrator is never told
@@ -682,7 +694,7 @@ error at all.
 **More than one Devin account.** Both of Cognition's limits are per credential —
 a short one that recycles in well under a minute, and a longer window that can
 lock for twelve minutes — so a second account is a switch rather than a wait.
-Log in again with the data directory pointed somewhere else and devinx finds it:
+Log in again with the data directory pointed somewhere else and ccproxy finds it:
 
 ```sh
 XDG_DATA_HOME="<data dir>/account2" devin auth login
@@ -693,9 +705,9 @@ spread across them round robin — always starting at the same one keeps that on
 permanently at its ceiling while the others idle, which is the difference
 between switching on every burst and not being limited at all. On a rate limit
 the turn moves to another credential immediately, and only waits when every one
-of them is spent. `DEVINX_API_KEYS` takes a
+of them is spent. `CCPROXY_API_KEYS` takes a
 comma-separated list instead. Each request logs the account that served it, so
-which credential a limit belongs to is answerable from the log. A login done while the service is running is picked up without a restart, within 30 seconds (`DEVINX_RESCAN`); deleting a credential's file removes it the same way.
+which credential a limit belongs to is answerable from the log. A login done while the service is running is picked up without a restart, within 30 seconds (`CCPROXY_RESCAN`); deleting a credential's file removes it the same way.
 
 **Free accounts are abandoned for model calls.** As soon as the JWT reports
 `pro=false`, that credential is excluded before any model request and is not
@@ -709,7 +721,7 @@ credential back up for a fresh plan check; waiting or restarting does not send
 model requests to it. If none is eligible, the proxy reports a Devin service
 error rather than telling Claude Code to run `/login`.
 
-`DEVINX_RATE_WAIT` bounds the total wait (1800s by default) — the client has its
+`CCPROXY_RATE_WAIT` bounds the total wait (1800s by default) — the client has its
 own timeout, and an answer that never comes is worse than one that says to try
 later. Past that budget the refusal does go back, as a 429 `rate_limit_error`
 carrying `retry-after`.
@@ -725,18 +737,18 @@ obvious two.
 The client enforces the declared window itself for a model it does not
 recognise, and for a subagent that enforcement is fatal rather than corrective:
 the agent ends with "Agent terminated early due to an API error: Prompt is too
-long (error type invalid_request)" and devinx never receives a request at all —
+long (error type invalid_request)" and ccproxy never receives a request at all —
 refused on the client's own estimate, without compacting and without asking. The
 launcher therefore sets `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT`,
 measured: the same subagent then runs to completion, its turns reaching the
-upstream that was always willing to take them. `DEVINX_ENFORCE_WINDOW=1` puts
+upstream that was always willing to take them. `CCPROXY_ENFORCE_WINDOW=1` puts
 the local cap back.
 
 The other two are the window and the wording.
 
 And past those, the proxy compacts. A client compacts its main session but not
 an agent: measured, an agent at its limit drops a single message — 30412 tokens
-to 30284 — and then ends with that error, having summarised nothing. So devinx
+to 30284 — and then ends with that error, having summarised nothing. So ccproxy
 does it instead. When a turn would not fit, the first turn is kept (it is the
 task), the recent turns are kept verbatim, and everything between is replaced by
 a summary written with Claude Code's own compaction prompt, read out of its
@@ -747,17 +759,17 @@ against an 80k threshold compacted to 18k and finished its task.
 
 Compaction is lossy by nature — the agent keeps the summary, not the detail —
 and a threshold set below the size of what the agent is actually working on will
-make it re-read the same files forever. `DEVINX_COMPACT_AT` sets it; the default
-leaves roughly 96k of recent turns verbatim. devinx declares 262144 —
+make it re-read the same files forever. `CCPROXY_COMPACT_AT` sets it; the default
+leaves roughly 96k of recent turns verbatim. ccproxy declares 262144 —
 the real one — through `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, which is the only lever
 that works: a `context_window` on the model catalog is ignored for a model the
-client does not recognise. `DEVINX_CONTEXT_TOKENS` overrides it, and erring low
+client does not recognise. `CCPROXY_CONTEXT_TOKENS` overrides it, and erring low
 costs only an earlier compaction.
 
 The other is the wording of the refusal. A client recovers from an overflow by
 parsing two numbers out of the message, and Cognition's has none in it — it says
 "The prompt is too long for this model" and nothing more, so the recovery never
-fires. devinx rewrites it as `prompt is too long: N tokens > M maximum`, with N
+fires. ccproxy rewrites it as `prompt is too long: N tokens > M maximum`, with N
 estimated locally and M the declared window. Measured on one machine before that
 change: 48 overflows in a day, on requests of 1.7MB and 200 messages, while
 every turn that did compact stopped at 257k — the window was being honoured on
@@ -766,11 +778,11 @@ one path and ignored on another.
 **Checking what a Codex session will actually see**, without spending a request:
 
 ```sh
-devinx --cx --or debug prompt-input
+ccproxy --cx --or debug prompt-input
 ```
 
 **Everything is broken.** `claude` and `codex` on their own do not go through
-devinx at all and are always available as a fallback.
+ccproxy at all and are always available as a fallback.
 
 ## Refreshing the protobuf descriptors
 

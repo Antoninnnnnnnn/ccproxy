@@ -64,17 +64,17 @@ def _state_dir():
     CLAUDE_PLUGIN_ROOT is not the repo root, so importing across that
     boundary would be more fragile than repeating a dozen lines).
     """
-    if os.environ.get("DEVINX_DATA"):
-        base = os.path.normpath(os.environ["DEVINX_DATA"])
+    if os.environ.get("CCPROXY_DATA"):
+        base = os.path.normpath(os.environ["CCPROXY_DATA"])
     elif sys.platform == "win32":
         base = os.path.join(
-            os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "devinx")
+            os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "ccproxy")
     elif sys.platform == "darwin":
-        base = os.path.expanduser("~/Library/Application Support/devinx")
+        base = os.path.expanduser("~/Library/Application Support/ccproxy")
     else:
         base = os.path.join(
             os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
-            "devinx")
+            "ccproxy")
     directory = os.path.join(base, "hooks")
     try:
         os.makedirs(directory, mode=0o700, exist_ok=True)
@@ -255,7 +255,7 @@ def main():
     """Fail open on literally anything unexpected, not just malformed JSON.
 
     _run() below assumes a writable state directory, a well-formed lock file
-    and paths safe to realpath - an unwritable HOME, DEVINX_DATA pointing at
+    and paths safe to realpath - an unwritable HOME, CCPROXY_DATA pointing at
     a plain file, or a target containing an embedded NUL each raise
     something _run() does not itself catch. None of those are the model's
     fault, so none of them may become a traceback in front of it, or - worse

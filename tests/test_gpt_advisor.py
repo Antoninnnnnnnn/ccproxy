@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-import devinx
+import ccproxy
 from test_audit_fixes import LiveServer
 
 ADVISOR_TOOL = {'type': 'advisor_20260301', 'name': 'advisor',
@@ -89,7 +89,7 @@ class FakeSidecar:
                 outer.raw.append(raw)
                 outer.headers.append({k.lower(): v for k, v in self.headers.items()})
                 outer.seen.append(body)
-                if body.get('system') == devinx.GPT_ADVISOR_SYSTEM:
+                if body.get('system') == ccproxy.GPT_ADVISOR_SYSTEM:
                     status, payload = outer.advice(body)
                     ctype = 'application/json'
                 else:
@@ -113,11 +113,11 @@ class FakeSidecar:
 
     def advisor_calls(self):
         return [b for b in self.seen
-                if b.get('system') == devinx.GPT_ADVISOR_SYSTEM]
+                if b.get('system') == ccproxy.GPT_ADVISOR_SYSTEM]
 
     def turn_calls(self):
         return [b for b in self.seen
-                if b.get('system') != devinx.GPT_ADVISOR_SYSTEM]
+                if b.get('system') != ccproxy.GPT_ADVISOR_SYSTEM]
 
     def close(self):
         self.server.shutdown()
@@ -125,7 +125,7 @@ class FakeSidecar:
 
 
 def parse_stream(raw):
-    return [e for _, e in devinx.sse_events([raw]) if e]
+    return [e for _, e in ccproxy.sse_events([raw]) if e]
 
 
 def request(tools=(ADVISOR_TOOL,), stream=True, extra=()):
@@ -142,7 +142,7 @@ class AdvisorBase(unittest.TestCase):
         self.addCleanup(self.sidecar.close)
         for name, value in (('GPT_UPSTREAM', self.sidecar.url),
                             ('GPT_ADVISOR_MAX_CALLS', self.MAX_CALLS)):
-            patcher = mock.patch.object(devinx, name, value)
+            patcher = mock.patch.object(ccproxy, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
         self.live = LiveServer()
@@ -213,7 +213,7 @@ class AdvisorFlowTests(AdvisorBase):
             ([text('done')], 'end_turn'))
         self.send(request())
         (asked,) = self.sidecar.advisor_calls()
-        self.assertEqual(asked['model'], devinx.GPT_ADVISOR_MODEL)
+        self.assertEqual(asked['model'], ccproxy.GPT_ADVISOR_MODEL)
         self.assertNotIn('tools', asked)
         prompt = json.dumps(asked['messages'])
         self.assertIn('fix the parser', prompt)
@@ -303,7 +303,7 @@ class AdvisorFlowTests(AdvisorBase):
     def test_calls_are_capped_and_a_model_that_keeps_asking_is_ended(self):
         self.sidecar.turns = lambda body: turn_events(
             [call('advisor', id='call_a')], 'tool_use')
-        with mock.patch.object(devinx, 'GPT_ADVISOR_MAX_CALLS', 1):
+        with mock.patch.object(ccproxy, 'GPT_ADVISOR_MAX_CALLS', 1):
             status, raw = self.send(request())
         self.assertEqual(status, 200)
         self.assertEqual(len(self.sidecar.advisor_calls()), 1)
@@ -325,7 +325,7 @@ class AdvisorFlowTests(AdvisorBase):
         body = {**request(), 'metadata': {'user_id': json.dumps({'session_id': 'S1'})}}
         self.send(body)
         i = next(n for n, b in enumerate(self.sidecar.seen)
-                 if b.get('system') == devinx.GPT_ADVISOR_SYSTEM)
+                 if b.get('system') == ccproxy.GPT_ADVISOR_SYSTEM)
         key = self.sidecar.headers[i]['x-claude-code-session-id']
         self.assertEqual(key, 'S1:advisor:agent-1')
         self.assertEqual(json.loads(self.sidecar.seen[i]['metadata']['user_id']),
@@ -339,7 +339,7 @@ class AdvisorFlowTests(AdvisorBase):
             ([text('done')], 'end_turn'))
         self.send(request(), agent=False)
         i = next(n for n, b in enumerate(self.sidecar.seen)
-                 if b.get('system') == devinx.GPT_ADVISOR_SYSTEM)
+                 if b.get('system') == ccproxy.GPT_ADVISOR_SYSTEM)
         self.assertNotIn('x-claude-code-session-id', self.sidecar.headers[i])
         self.assertNotIn('metadata', self.sidecar.seen[i])
 
@@ -351,9 +351,9 @@ class AdvisorFlowTests(AdvisorBase):
         self.sidecar.turns = self.two_legs(
             ([call('advisor', id='call_a')], 'tool_use'),
             ([text('done')], 'end_turn'))
-        with mock.patch.object(devinx, 'KEEPALIVE_EVERY', 1):
+        with mock.patch.object(ccproxy, 'KEEPALIVE_EVERY', 1):
             status, raw = self.send(request())
-        self.assertIn(b': devinx advising', raw)
+        self.assertIn(b': ccproxy advising', raw)
         self.assertIn(b'late advice', raw)
         self.assertEqual(parse_stream(raw)[-1]['type'], 'message_stop')
 
@@ -386,7 +386,7 @@ class AdvisorFlowTests(AdvisorBase):
         self.sidecar.turns = self.two_legs(
             ([call('advisor', id='call_a')], 'tool_use'),
             ([text('done')], 'end_turn'))
-        with mock.patch.object(devinx, 'KEEPALIVE_EVERY', 1):
+        with mock.patch.object(ccproxy, 'KEEPALIVE_EVERY', 1):
             conn = http.client.HTTPConnection('127.0.0.1', self.live.port,
                                               timeout=10)
             conn.request('POST', '/v1/messages', body=json.dumps(request()).encode(),
@@ -436,8 +436,8 @@ class AdvisorOffTests(AdvisorBase):
 
     def test_it_is_off_unless_asked_for(self):
         import os
-        if 'DEVINX_ADVISOR_MAX_CALLS' not in os.environ:
-            code = ("import devinx; print(devinx.GPT_ADVISOR_MAX_CALLS)")
+        if 'CCPROXY_ADVISOR_MAX_CALLS' not in os.environ:
+            code = ("import ccproxy; print(ccproxy.GPT_ADVISOR_MAX_CALLS)")
             import subprocess
             out = subprocess.run([sys.executable, '-c', code], cwd=ROOT,
                                  capture_output=True, text=True).stdout.split()
@@ -478,7 +478,7 @@ class AdvisorHistoryTests(unittest.TestCase):
             {'role': 'user', 'content': 'thanks, go on'}]}
 
     def test_a_pair_becomes_an_ordinary_tool_call_and_result(self):
-        body = devinx.gpt_translate_advisor_history(self.history(
+        body = ccproxy.gpt_translate_advisor_history(self.history(
             {'type': 'advisor_result', 'text': 'do X'}))
         roles = [m['role'] for m in body['messages']]
         self.assertEqual(roles, ['user', 'assistant', 'user', 'assistant', 'user'])
@@ -495,21 +495,21 @@ class AdvisorHistoryTests(unittest.TestCase):
     def test_an_assistant_turn_that_ends_on_the_result_merges_the_next_user_turn(self):
         history = self.history({'type': 'advisor_result', 'text': 'do X'})
         history['messages'][1]['content'].pop()
-        body = devinx.gpt_translate_advisor_history(history)
+        body = ccproxy.gpt_translate_advisor_history(history)
         roles = [m['role'] for m in body['messages']]
         self.assertEqual(roles, ['user', 'assistant', 'user'])
         self.assertEqual([b['type'] for b in body['messages'][2]['content']],
                          ['tool_result', 'text'])
 
     def test_what_claude_wrote_for_itself_is_said_so(self):
-        body = devinx.gpt_translate_advisor_history(self.history(
+        body = ccproxy.gpt_translate_advisor_history(self.history(
             {'type': 'advisor_redacted_result', 'encrypted_content': 'AAAA'}))
         result = body['messages'][2]['content'][0]
         self.assertIn('cannot be read', result['content'])
         self.assertNotIn('AAAA', json.dumps(body))
 
     def test_an_advisor_error_is_an_error_result(self):
-        body = devinx.gpt_translate_advisor_history(self.history(
+        body = ccproxy.gpt_translate_advisor_history(self.history(
             {'type': 'advisor_tool_result_error', 'error_code': 'unavailable'}))
         result = body['messages'][2]['content'][0]
         self.assertTrue(result['is_error'])
@@ -518,7 +518,7 @@ class AdvisorHistoryTests(unittest.TestCase):
     def test_a_call_that_never_got_a_result_is_closed(self):
         history = self.history({'type': 'advisor_result', 'text': 'x'})
         del history['messages'][1]['content'][2]
-        body = devinx.gpt_translate_advisor_history(history)
+        body = ccproxy.gpt_translate_advisor_history(history)
         result = next(b for m in body['messages'] if m['role'] == 'user'
                       and isinstance(m['content'], list)
                       for b in m['content'] if b.get('type') == 'tool_result')
@@ -528,18 +528,18 @@ class AdvisorHistoryTests(unittest.TestCase):
     def test_a_result_with_no_call_is_dropped(self):
         history = self.history({'type': 'advisor_result', 'text': 'x'})
         del history['messages'][1]['content'][1]
-        body = devinx.gpt_translate_advisor_history(history)
+        body = ccproxy.gpt_translate_advisor_history(history)
         self.assertNotIn('advisor_tool_result', json.dumps(body))
 
     def test_nothing_to_translate_is_the_same_object(self):
         body = {'messages': [{'role': 'user', 'content': 'hi'}]}
-        self.assertIs(devinx.gpt_translate_advisor_history(body), body)
+        self.assertIs(ccproxy.gpt_translate_advisor_history(body), body)
 
     def test_a_replayed_history_reaches_the_sidecar_translated(self):
         sidecar = FakeSidecar()
         self.addCleanup(sidecar.close)
         for target, value in (('GPT_UPSTREAM', sidecar.url),):
-            patcher = mock.patch.object(devinx, target, value)
+            patcher = mock.patch.object(ccproxy, target, value)
             patcher.start()
             self.addCleanup(patcher.stop)
         live = LiveServer()
@@ -560,31 +560,31 @@ class AdvisorToolTests(unittest.TestCase):
 
     def test_the_server_tool_becomes_a_plain_function(self):
         body = {'tools': [BASH_TOOL, ADVISOR_TOOL]}
-        swapped = devinx.gpt_swap_advisor(body, keep=True)
+        swapped = ccproxy.gpt_swap_advisor(body, keep=True)
         self.assertEqual([t['name'] for t in swapped['tools']], ['Bash', 'advisor'])
         self.assertNotIn('type', swapped['tools'][1])
         self.assertNotIn('defer_loading', swapped['tools'][1])
         self.assertEqual(body['tools'][1], ADVISOR_TOOL)
 
     def test_it_can_be_taken_out(self):
-        swapped = devinx.gpt_swap_advisor({'tools': [BASH_TOOL, ADVISOR_TOOL]},
+        swapped = ccproxy.gpt_swap_advisor({'tools': [BASH_TOOL, ADVISOR_TOOL]},
                                           keep=False)
         self.assertEqual([t['name'] for t in swapped['tools']], ['Bash'])
 
     def test_a_body_without_it_is_the_same_object(self):
         body = {'tools': [BASH_TOOL]}
-        self.assertIs(devinx.gpt_swap_advisor(body, keep=True), body)
-        self.assertFalse(devinx.gpt_declares_advisor(body))
-        self.assertFalse(devinx.gpt_declares_advisor(
+        self.assertIs(ccproxy.gpt_swap_advisor(body, keep=True), body)
+        self.assertFalse(ccproxy.gpt_declares_advisor(body))
+        self.assertFalse(ccproxy.gpt_declares_advisor(
             {'tools': [{'name': 'advisor', 'input_schema': {}}]}))
 
     def test_stream_parser_survives_chunks_cut_anywhere(self):
         raw = turn_events([text('hello')])
         for cut in (1, 7, 50, len(raw) - 3):
-            events = list(devinx.sse_events([raw[:cut], raw[cut:]]))
+            events = list(ccproxy.sse_events([raw[:cut], raw[cut:]]))
             self.assertEqual([n for n, _ in events if n][-1], 'message_stop')
-        self.assertEqual(len(list(devinx.sse_events([raw.replace(b'\n', b'\r\n')]))),
-                         len(list(devinx.sse_events([raw]))))
+        self.assertEqual(len(list(ccproxy.sse_events([raw.replace(b'\n', b'\r\n')]))),
+                         len(list(ccproxy.sse_events([raw]))))
 
 
 class ReportBanTests(unittest.TestCase):
@@ -600,7 +600,7 @@ class ReportBanTests(unittest.TestCase):
                             + (note or self.CLAUDE_CODE_NOTE)}]}
 
     def test_a_requested_report_is_allowed_and_an_unrequested_one_is_not(self):
-        out = devinx.relax_report_ban(self.body())
+        out = ccproxy.relax_report_ban(self.body())
         rewritten = out['system'][1]['text']
         self.assertIn('on your own initiative', rewritten)
         self.assertIn('names a path to write', rewritten)
@@ -610,30 +610,30 @@ class ReportBanTests(unittest.TestCase):
         self.assertEqual(out['system'][0], {'type': 'text', 'text': 'billing'})
 
     def test_it_is_applied_once(self):
-        once = devinx.relax_report_ban(self.body())
-        self.assertIs(devinx.relax_report_ban(once), once)
+        once = ccproxy.relax_report_ban(self.body())
+        self.assertIs(ccproxy.relax_report_ban(once), once)
 
     def test_a_system_prompt_without_the_sentence_is_the_same_object(self):
         body = {'system': 'You are a subagent.'}
-        self.assertIs(devinx.relax_report_ban(body), body)
+        self.assertIs(ccproxy.relax_report_ban(body), body)
         body = {'system': [{'type': 'text', 'text': 'x'}]}
-        self.assertIs(devinx.relax_report_ban(body), body)
+        self.assertIs(ccproxy.relax_report_ban(body), body)
 
     def test_string_system_prompts_too(self):
-        out = devinx.relax_report_ban({'system': self.CLAUDE_CODE_NOTE})
+        out = ccproxy.relax_report_ban({'system': self.CLAUDE_CODE_NOTE})
         self.assertIn('on your own initiative', out['system'])
 
     def test_the_swe_route_is_left_as_it_was(self):
         # SWE-2 subagents were measured writing a requested report with the
         # sentence in place, so that route is not touched.
-        scrubbed = devinx._scrub_system(self.CLAUDE_CODE_NOTE)
+        scrubbed = ccproxy._scrub_system(self.CLAUDE_CODE_NOTE)
         self.assertNotIn('on your own initiative', scrubbed)
         self.assertIn('Do NOT Write report', scrubbed)
 
     def test_a_gpt_subagent_request_is_rewritten_on_the_way_out(self):
         sidecar = FakeSidecar()
         self.addCleanup(sidecar.close)
-        patcher = mock.patch.object(devinx, 'GPT_UPSTREAM', sidecar.url)
+        patcher = mock.patch.object(ccproxy, 'GPT_UPSTREAM', sidecar.url)
         patcher.start()
         self.addCleanup(patcher.stop)
         live = LiveServer()

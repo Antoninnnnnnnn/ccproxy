@@ -3,11 +3,11 @@
 A Kimi Code subscription comes with an API key (`sk-kimi-...`) for its coding
 endpoint, which speaks the Anthropic Messages API natively: thinking with
 signatures, tool use, prompt caching, count_tokens. So unlike gpt-* nothing is
-translated; devinx relays the turn with the subscription's key in place of the
+translated; ccproxy relays the turn with the subscription's key in place of the
 client's own credential, the way it does SWE-2 with a Devin login.
 
 The keys live in `<data dir>/kimi/<name>.key`, one account per file, written by
-`devinx --kimi-add`. `DEVINX_KIMI_KEYS` (comma-separated) replaces the files.
+`ccproxy --kimi-add`. `CCPROXY_KIMI_KEYS` (comma-separated) replaces the files.
 Standard library only: the launcher imports this to decide whether to offer the
 Kimi rows and agents at all, and the add command validates a key with urllib.
 """
@@ -21,7 +21,7 @@ import time
 import urllib.error
 import urllib.request
 
-UPSTREAM = os.environ.get("DEVINX_KIMI_UPSTREAM", "https://api.kimi.com/coding")
+UPSTREAM = os.environ.get("CCPROXY_KIMI_UPSTREAM", "https://api.kimi.com/coding")
 PREFIX = "kimi-"
 # Kimi's thinking signatures are opaque base64 with nothing to tell them from
 # Anthropic's, which refuses any it did not sign. Every signature that leaves
@@ -44,8 +44,8 @@ MODELS = (
 # has medium and xhigh; each goes to the level above it.
 EFFORTS = {"low": "low", "medium": "high", "high": "high",
            "xhigh": "max", "max": "max"}
-COMPACT_AT = (int(os.environ["DEVINX_KIMI_COMPACT_AT"])
-              if os.environ.get("DEVINX_KIMI_COMPACT_AT") else None)
+COMPACT_AT = (int(os.environ["CCPROXY_KIMI_COMPACT_AT"])
+              if os.environ.get("CCPROXY_KIMI_COMPACT_AT") else None)
 KEY_SHAPE = re.compile(r"^sk-kimi-[A-Za-z0-9]{16,}$")
 NAME_SHAPE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
@@ -258,8 +258,8 @@ def _key_files(data_dir):
 
 
 def load_accounts(data_dir):
-    """[{'name', 'key', 'path'}], from DEVINX_KIMI_KEYS or the key files."""
-    env = os.environ.get("DEVINX_KIMI_KEYS", "")
+    """[{'name', 'key', 'path'}], from CCPROXY_KIMI_KEYS or the key files."""
+    env = os.environ.get("CCPROXY_KIMI_KEYS", "")
     if env.strip():
         keys = [k.strip() for k in env.split(",") if k.strip()]
         return [{"name": f"kimi-env{i + 1}", "key": k, "path": None}
@@ -279,8 +279,8 @@ def load_accounts(data_dir):
 
 def signature(data_dir):
     """What changes when an account is added, removed or rewritten."""
-    if os.environ.get("DEVINX_KIMI_KEYS", "").strip():
-        return ("env", os.environ["DEVINX_KIMI_KEYS"])
+    if os.environ.get("CCPROXY_KIMI_KEYS", "").strip():
+        return ("env", os.environ["CCPROXY_KIMI_KEYS"])
     out = []
     for path in _key_files(data_dir):
         try:
@@ -327,7 +327,7 @@ class Pool:
             if a is None:
                 a = {**f, "blocked_until": 0.0, "used_at": 0.0, "invalid": None,
                      "usage": None, "usage_at": 0.0}
-                print(f"devinx: Kimi account {f['name']} loaded", flush=True)
+                print(f"ccproxy: Kimi account {f['name']} loaded", flush=True)
             else:
                 a["name"], a["path"] = f["name"], f["path"]
                 if a.get("invalid") is not None and _mtime(f["path"]) != a["invalid"]:
@@ -335,7 +335,7 @@ class Pool:
             merged.append(a)
         for a in self.accounts:
             if a["key"] not in {f["key"] for f in fresh}:
-                print(f"devinx: Kimi account {a['name']} removed", flush=True)
+                print(f"ccproxy: Kimi account {a['name']} removed", flush=True)
         self.accounts = merged
 
     def snapshot(self):
@@ -363,14 +363,14 @@ class Pool:
     def block(self, acct, seconds, why=""):
         with self.lock:
             acct["blocked_until"] = max(acct["blocked_until"], time.time() + seconds)
-        print(f"devinx: Kimi account {acct['name']} blocked {seconds:.0f}s"
+        print(f"ccproxy: Kimi account {acct['name']} blocked {seconds:.0f}s"
               f"{' (' + why + ')' if why else ''}", flush=True)
 
     def invalidate(self, acct):
         with self.lock:
             acct["invalid"] = _mtime(acct.get("path"))
-        print(f"devinx: Kimi account {acct['name']} refused by the upstream; "
-              f"set aside until its key is replaced (devinx --kimi-add "
+        print(f"ccproxy: Kimi account {acct['name']} refused by the upstream; "
+              f"set aside until its key is replaced (ccproxy --kimi-add "
               f"{acct['name']})", flush=True)
 
 
@@ -383,7 +383,7 @@ def _mtime(path):
 
 def _get_json(path, key, timeout=15):
     req = urllib.request.Request(UPSTREAM + path, headers={
-        "authorization": f"Bearer {key}", "user-agent": "devinx"})
+        "authorization": f"Bearer {key}", "user-agent": "ccproxy"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 
@@ -475,20 +475,20 @@ def add(data_dir, name=None, key=None, out=sys.stdout):
                if sys.stdin.isatty() else sys.stdin.readline())
     key = key.strip()
     if not KEY_SHAPE.match(key):
-        print("devinx: that does not look like a Kimi Code key (sk-kimi-...)",
+        print("ccproxy: that does not look like a Kimi Code key (sk-kimi-...)",
               file=sys.stderr)
         return 2
     try:
         data = _get_json("/v1/usages", key)
     except urllib.error.HTTPError as e:
-        print(f"devinx: the key was refused by Kimi ({e.code}); nothing saved",
+        print(f"ccproxy: the key was refused by Kimi ({e.code}); nothing saved",
               file=sys.stderr)
         return 1
     except Exception as e:
-        print(f"devinx: could not reach Kimi to check the key "
+        print(f"ccproxy: could not reach Kimi to check the key "
               f"({type(e).__name__}); nothing saved", file=sys.stderr)
         return 1
-    existing = load_accounts(data_dir) if not os.environ.get("DEVINX_KIMI_KEYS") else []
+    existing = load_accounts(data_dir) if not os.environ.get("CCPROXY_KIMI_KEYS") else []
     if name is None:
         same = [a for a in existing if a["key"] == key]
         name = same[0]["name"] if same else f"kimi{len(existing) + 1}"
@@ -498,7 +498,7 @@ def add(data_dir, name=None, key=None, out=sys.stdout):
             n += 1
             name = f"kimi{n}"
     if not NAME_SHAPE.match(name):
-        print("devinx: an account name is letters, digits, '.', '_' or '-'",
+        print("ccproxy: an account name is letters, digits, '.', '_' or '-'",
               file=sys.stderr)
         return 2
     folder = keys_dir(data_dir)
@@ -520,8 +520,8 @@ def add(data_dir, name=None, key=None, out=sys.stdout):
         raise
     print(f"Kimi account {name} saved ({_mask(key)}): "
           f"{_describe(parse_usage(data))}", file=out)
-    if os.environ.get("DEVINX_KIMI_KEYS"):
-        print("note: DEVINX_KIMI_KEYS is set and replaces the saved keys",
+    if os.environ.get("CCPROXY_KIMI_KEYS"):
+        print("note: CCPROXY_KIMI_KEYS is set and replaces the saved keys",
               file=out)
     return 0
 
@@ -529,7 +529,7 @@ def add(data_dir, name=None, key=None, out=sys.stdout):
 def list_accounts(data_dir, out=sys.stdout):
     accounts = load_accounts(data_dir)
     if not accounts:
-        print("no Kimi account: add one with `devinx --kimi-add`", file=out)
+        print("no Kimi account: add one with `ccproxy --kimi-add`", file=out)
         return 1
     for a in accounts:
         try:
@@ -545,7 +545,7 @@ def list_accounts(data_dir, out=sys.stdout):
 def remove(data_dir, name, out=sys.stdout):
     path = os.path.join(keys_dir(data_dir), f"{name}.key")
     if not NAME_SHAPE.match(name or "") or not os.path.exists(path):
-        print(f"devinx: no Kimi account named {name!r}", file=sys.stderr)
+        print(f"ccproxy: no Kimi account named {name!r}", file=sys.stderr)
         return 1
     os.remove(path)
     print(f"Kimi account {name} removed", file=out)
@@ -553,14 +553,14 @@ def remove(data_dir, name, out=sys.stdout):
 
 
 def main(flag, rest, data_dir):
-    """`devinx --kimi-add [name]`, `--kimi-list`, `--kimi-remove name`."""
+    """`ccproxy --kimi-add [name]`, `--kimi-list`, `--kimi-remove name`."""
     if flag == "--kimi-add":
         return add(data_dir, rest[0] if rest else None)
     if flag == "--kimi-list":
         return list_accounts(data_dir)
     if flag == "--kimi-remove":
         if not rest:
-            print("usage: devinx --kimi-remove <name>", file=sys.stderr)
+            print("usage: ccproxy --kimi-remove <name>", file=sys.stderr)
             return 2
         return remove(data_dir, rest[0])
     return 2

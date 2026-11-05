@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 
 # Runtime state and diagnostics, never part of the package
+ccproxy.log
 devinx.log
 *.log
 install-smoke.log

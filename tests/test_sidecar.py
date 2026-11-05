@@ -52,14 +52,14 @@ class PackagedFilesTests(unittest.TestCase):
         self.assertIn("ExecStart=%h/.local/bin/claude-code-proxy serve", unit)
         self.assertNotIn(home, unit)
 
-    def test_the_default_port_is_the_one_devinx_expects(self):
-        import devinx
-        self.assertTrue(devinx.GPT_UPSTREAM.endswith(f":{build.DEFAULT_PORT}")
-                        or "DEVINX_GPT_UPSTREAM" in os.environ)
+    def test_the_default_port_is_the_one_ccproxy_expects(self):
+        import ccproxy
+        self.assertTrue(ccproxy.GPT_UPSTREAM.endswith(f":{build.DEFAULT_PORT}")
+                        or "CCPROXY_GPT_UPSTREAM" in os.environ)
 
     def test_the_readme_no_longer_points_outside_the_repo(self):
         readme = (ROOT / "README.md").read_text()
-        self.assertNotIn("devinx-local", readme)
+        self.assertNotIn("ccproxy-local", readme)
         self.assertIn("sidecar/build.py", readme)
 
 

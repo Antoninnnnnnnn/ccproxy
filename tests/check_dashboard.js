@@ -59,7 +59,7 @@ console.log('Dashboard syntax, empty/legacy states and safe live-table rendering
     document: {createElement: el, getElementById: id => ids[id] || (ids[id] = el()),
                querySelector: () => el(), querySelectorAll: () => [],
                documentElement: el(), body: el(), addEventListener() {}},
-    location: {href: 'https://x/devinx/dashboard', search: ''}, history: {replaceState() {}},
+    location: {href: 'https://x/ccproxy/dashboard', search: ''}, history: {replaceState() {}},
     localStorage: {getItem() { return null; }, setItem() {}}, matchMedia: media,
     window: {matchMedia: media, addEventListener() {}, devicePixelRatio: 1},
     setInterval() {}, setTimeout() {}, fetch: () => new Promise(() => {}),

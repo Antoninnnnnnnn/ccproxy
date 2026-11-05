@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Devin / SWE-2 access is off unless DEVINX_SWE=1.
+"""Devin / SWE-2 access is off unless CCPROXY_SWE=1.
 
 The service refuses swe-* models, neither catalog lists them, and the launcher
 offers no swe2-* agent, no SWE-2 /model entry and no Codex SWE role. Claude and
@@ -21,20 +21,20 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-import devinx
+import ccproxy
 import launcher
 import runtime_support
 from test_audit_fixes import LiveServer
 
 
 def off():
-    """The environment of a user who never set DEVINX_SWE."""
-    env = {k: v for k, v in os.environ.items() if k != "DEVINX_SWE"}
+    """The environment of a user who never set CCPROXY_SWE."""
+    env = {k: v for k, v in os.environ.items() if k != "CCPROXY_SWE"}
     return mock.patch.dict(os.environ, env, clear=True)
 
 
 def on():
-    return mock.patch.dict(os.environ, {"DEVINX_SWE": "1"})
+    return mock.patch.dict(os.environ, {"CCPROXY_SWE": "1"})
 
 
 def post(port, path, body):
@@ -55,9 +55,9 @@ class SwitchTests(unittest.TestCase):
         for value, expected in ((None, False), ("", False), ("0", False),
                                 ("true", False), ("1", True)):
             with self.subTest(value=value):
-                env = {k: v for k, v in os.environ.items() if k != "DEVINX_SWE"}
+                env = {k: v for k, v in os.environ.items() if k != "CCPROXY_SWE"}
                 if value is not None:
-                    env["DEVINX_SWE"] = value
+                    env["CCPROXY_SWE"] = value
                 with mock.patch.dict(os.environ, env, clear=True):
                     self.assertIs(runtime_support.swe_enabled(), expected)
 
@@ -71,10 +71,10 @@ class ServiceTests(unittest.TestCase):
         # Any of these being called would mean a Devin quota could be spent.
         boom = AssertionError("a Devin credential was touched")
         with off(), \
-                mock.patch.object(devinx, "accounts", side_effect=boom), \
-                mock.patch.object(devinx, "claim_account", side_effect=boom), \
-                mock.patch.object(devinx, "get_jwt", side_effect=boom), \
-                mock.patch.object(devinx, "_first_usable", side_effect=boom):
+                mock.patch.object(ccproxy, "accounts", side_effect=boom), \
+                mock.patch.object(ccproxy, "claim_account", side_effect=boom), \
+                mock.patch.object(ccproxy, "get_jwt", side_effect=boom), \
+                mock.patch.object(ccproxy, "_first_usable", side_effect=boom):
             for model in ("swe-2", "swe-2-max", "swe-2-high", "swe-2-medium"):
                 for path in ("/v1/messages", "/v1/messages/count_tokens",
                              "/v1/responses"):
@@ -100,7 +100,7 @@ class ServiceTests(unittest.TestCase):
     def test_codex_catalog_has_no_swe_row(self):
         upstream = mock.Mock(status_code=200)
         upstream.json.return_value = {"models": [{"slug": "gpt-test"}]}
-        with off(), mock.patch.object(devinx.SESSION, "get",
+        with off(), mock.patch.object(ccproxy.SESSION, "get",
                                       return_value=upstream):
             status, body = self.live.get(
                 "/v1/models?client_version=1.0",
@@ -152,18 +152,18 @@ class LauncherTests(unittest.TestCase):
                                 ("1", ["ANTHROPIC_CUSTOM_MODEL_OPTION",
                                        "ANTHROPIC_CUSTOM_MODEL_OPTION_"
                                        "SUPPORTED_CAPABILITIES"])):
-            with self.subTest(DEVINX_SWE=value):
+            with self.subTest(CCPROXY_SWE=value):
                 env = {k: v for k, v in os.environ.items()
-                       if k != "DEVINX_SWE"}
+                       if k != "CCPROXY_SWE"}
                 if value:
-                    env["DEVINX_SWE"] = value
+                    env["CCPROXY_SWE"] = value
                 out = subprocess.run([sys.executable, "-I", "-c", code],
                                      env=env, capture_output=True, text=True,
                                      cwd=str(ROOT), check=True)
                 self.assertEqual(json.loads(out.stdout), expected)
 
-    def test_a_catalog_without_swe_still_identifies_devinx(self):
-        catalog = {"data": [{"id": "gpt-6-luna", "owned_by": "devinx"}]}
+    def test_a_catalog_without_swe_still_identifies_ccproxy(self):
+        catalog = {"data": [{"id": "gpt-6-luna", "owned_by": "ccproxy"}]}
         reply = mock.MagicMock()
         reply.__enter__.return_value.read.return_value = json.dumps(
             catalog).encode()

@@ -1,5 +1,5 @@
 [Unit]
-Description=claude-code-proxy sidecar: Claude Code -> ChatGPT Codex for devinx's gpt-* route
+Description=claude-code-proxy sidecar: Claude Code -> ChatGPT Codex for ccproxy's gpt-* route
 
 [Service]
 ExecStart=@BIN@ serve --no-monitor --port @PORT@

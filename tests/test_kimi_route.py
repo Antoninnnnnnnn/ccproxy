@@ -1,5 +1,5 @@
 """The kimi-* route: Claude Code on a Kimi Code model, relayed with a key
-devinx holds. Hermetic: Kimi is a fake upstream on an ephemeral loopback port,
+ccproxy holds. Hermetic: Kimi is a fake upstream on an ephemeral loopback port,
 the keys are fake and live in a temporary data directory.
 """
 import http.client
@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-import devinx
+import ccproxy
 import kimi
 from test_audit_fixes import LiveServer
 
@@ -131,11 +131,11 @@ class KimiBase(unittest.TestCase):
         self.upstream = FakeKimi()
         self.addCleanup(self.upstream.close)
         self.pool = kimi.Pool(self.data)
-        env = mock.patch.dict(os.environ, {'DEVINX_KIMI_KEYS': ''})
+        env = mock.patch.dict(os.environ, {'CCPROXY_KIMI_KEYS': ''})
         env.start()
         self.addCleanup(env.stop)
         for target, name, value in ((kimi, 'UPSTREAM', self.upstream.url),
-                                    (devinx, 'KIMI_POOL', self.pool),
+                                    (ccproxy, 'KIMI_POOL', self.pool),
                                     (kimi, 'refresh_catalog', lambda *a, **k: False)):
             patcher = mock.patch.object(target, name, value)
             patcher.start()
@@ -325,7 +325,7 @@ class KimiCompactionTests(KimiBase):
         def spy(handler, body, force=False, committed=False, route='gpt'):
             forced.append((force, route))
             return body, committed
-        with mock.patch.object(devinx.Handler, 'compact_gpt', spy):
+        with mock.patch.object(ccproxy.Handler, 'compact_gpt', spy):
             status, _, _ = self.post(headers={'x-claude-code-agent-id': 'agent-1'})
         self.assertEqual(status, 200)
         self.assertEqual(forced, [(False, 'kimi'), (True, 'kimi')])
@@ -380,7 +380,7 @@ class KimiShapingTests(unittest.TestCase):
             {'role': 'assistant', 'content': [
                 {'type': 'thinking', 'thinking': 'p', 'signature': 'kimi:S'},
                 {'type': 'text', 'text': 'done'}]}]}
-        self.assertTrue(devinx.strip_foreign_thinking(body))
+        self.assertTrue(ccproxy.strip_foreign_thinking(body))
         self.assertEqual(body['messages'][1]['content'],
                          [{'type': 'text', 'text': 'done'}])
 
@@ -409,7 +409,7 @@ class KimiAccountFileTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.data = tmp.name
-        env = mock.patch.dict(os.environ, {'DEVINX_KIMI_KEYS': ''})
+        env = mock.patch.dict(os.environ, {'CCPROXY_KIMI_KEYS': ''})
         env.start()
         self.addCleanup(env.stop)
         usage = mock.patch.object(kimi, '_get_json', return_value={'usages': {}})
@@ -439,7 +439,7 @@ class KimiAccountFileTests(unittest.TestCase):
 
     def test_env_keys_replace_the_files(self):
         kimi.add(self.data, 'file', key=KEY_A, out=io.StringIO())
-        with mock.patch.dict(os.environ, {'DEVINX_KIMI_KEYS': KEY_B}):
+        with mock.patch.dict(os.environ, {'CCPROXY_KIMI_KEYS': KEY_B}):
             self.assertEqual([a['key'] for a in kimi.load_accounts(self.data)], [KEY_B])
 
 
@@ -450,8 +450,8 @@ class KimiLauncherTests(unittest.TestCase):
         self.launcher = launcher
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        env = mock.patch.dict(os.environ, {'DEVINX_DATA': tmp.name,
-                                           'DEVINX_KIMI_KEYS': ''})
+        env = mock.patch.dict(os.environ, {'CCPROXY_DATA': tmp.name,
+                                           'CCPROXY_KIMI_KEYS': ''})
         env.start()
         self.addCleanup(env.stop)
         self.data = tmp.name
@@ -474,7 +474,7 @@ class KimiLauncherTests(unittest.TestCase):
                           if a.startswith('kimi-')])
 
     def test_rows_and_agents_with_an_account(self):
-        with mock.patch.dict(os.environ, {'DEVINX_KIMI_KEYS': KEY_A}):
+        with mock.patch.dict(os.environ, {'CCPROXY_KIMI_KEYS': KEY_A}):
             settings = self.settings()
             agents = self.launcher.packaged_agents()
         rows = {r['model']: r for r in settings['modelPicker']['options']}

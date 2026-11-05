@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Statistics extractor for the devinx log.
+"""Statistics extractor for the ccproxy log.
 
-Reads ~/.local/share/devinx/devinx.log and prints one JSON object to stdout.
+Reads ~/.local/share/ccproxy/ccproxy.log and prints one JSON object to stdout.
 The log has no timestamps and has changed shape over time, so both dialects
 are parsed: early lines carry no acct/model/stop fields, newer ones do.
 Anything that matches no known shape is skipped, so a truncated line, a
@@ -38,10 +38,10 @@ import subprocess
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 
-# DEVINX_LOG exists so the extractor can be checked against a frozen copy of
+# CCPROXY_LOG exists so the extractor can be checked against a frozen copy of
 # the live, ever-appending log; the default is the real path.
 LOG_PATH = os.environ.get(
-    "DEVINX_LOG", os.path.expanduser("~/.local/share/devinx/devinx.log"))
+    "CCPROXY_LOG", os.path.expanduser("~/.local/share/ccproxy/ccproxy.log"))
 
 # Lines written since 2026-09-17 carry an ISO timestamp; older ones do not, and
 # both have to parse or the history disappears the day the format changed.
@@ -486,7 +486,7 @@ def collect(path, since=None, until=None, undated=False, ckpt=False):
                     m = RE_SUMMARY_DONE.match(line)
                     if m:
                         st["summary_seconds"] += float(m.group(1))
-                elif line.startswith("devinx: draining complete"):
+                elif line.startswith(("ccproxy: draining complete", "devinx: draining complete")):
                     st["drains"] += 1
                 elif line.startswith("unflattened:"):
                     st["repairs"]["conversations remises à plat"] += 1
@@ -496,7 +496,7 @@ def collect(path, since=None, until=None, undated=False, ckpt=False):
                     st["repairs"]["capacité system déclinée"] += 1
                 elif line.startswith("repaired tool ids"):
                     st["repairs"]["identifiants d'outil réparés"] += 1
-                elif line.startswith("devinx listening"):
+                elif line.startswith(("ccproxy listening", "devinx listening")):
                     st["restarts"] += 1
                     b = RE_BUILD.search(line)
                     if b and b.group(1) not in seen_builds:

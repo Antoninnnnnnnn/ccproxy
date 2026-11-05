@@ -16,9 +16,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 # These tests exercise the SWE-2 route, which is off by default.
-os.environ.setdefault("DEVINX_SWE", "1")
+os.environ.setdefault("CCPROXY_SWE", "1")
 
-import devinx
+import ccproxy
 from test_audit_fixes import LiveServer
 
 
@@ -78,7 +78,7 @@ class GptRouteTests(unittest.TestCase):
     def setUp(self):
         self.sidecar = FakeSidecar()
         self.addCleanup(self.sidecar.close)
-        patcher = mock.patch.object(devinx, 'GPT_UPSTREAM', self.sidecar.url)
+        patcher = mock.patch.object(ccproxy, 'GPT_UPSTREAM', self.sidecar.url)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.live = LiveServer()
@@ -201,10 +201,10 @@ class GptCompactionBase(unittest.TestCase):
         self.addCleanup(self.sidecar.close)
         for name, value in (('GPT_UPSTREAM', self.sidecar.url),
                             ('GPT_COMPACT_AT', 6000)):
-            patcher = mock.patch.object(devinx, name, value)
+            patcher = mock.patch.object(ccproxy, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
-        devinx._summaries.clear()
+        ccproxy._summaries.clear()
         self.live = LiveServer()
         self.addCleanup(self.live.close)
 
@@ -233,7 +233,7 @@ class GptCompactionTests(GptCompactionBase):
         self.assertIn('<conversation>', json.dumps(summary_call['body']))
         self.assertEqual(summary_call['body']['model'], 'gpt-6.1-sol')
         sent = turn['body']
-        self.assertLess(devinx.estimate_tokens(sent), 6000)
+        self.assertLess(ccproxy.estimate_tokens(sent), 6000)
         self.assertEqual(sent['messages'][0]['content'], 'the task: fix the parser')
         self.assertIn('SUMMARY: read f0..f9', json.dumps(sent['messages'][1]))
         self.assertEqual(sent['messages'][-1]['content'], 'continue')
@@ -261,10 +261,10 @@ class GptCompactionTests(GptCompactionBase):
 
     def test_slow_summary_keeps_the_stream_alive(self):
         self.sidecar.answer = summariser(delay=2.5)
-        with mock.patch.object(devinx, 'KEEPALIVE_EVERY', 1):
+        with mock.patch.object(ccproxy, 'KEEPALIVE_EVERY', 1):
             status, raw = self.send(long_history())
         self.assertEqual(status, 200)
-        self.assertTrue(raw.startswith(b': devinx compacting'))
+        self.assertTrue(raw.startswith(b': ccproxy compacting'))
         self.assertIn(b'message_stop', raw)
 
     def test_error_after_keepalive_is_an_sse_error(self):
@@ -275,7 +275,7 @@ class GptCompactionTests(GptCompactionBase):
                 return slow(body)
             return 429, b'{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}'
         self.sidecar.answer = answer
-        with mock.patch.object(devinx, 'KEEPALIVE_EVERY', 1):
+        with mock.patch.object(ccproxy, 'KEEPALIVE_EVERY', 1):
             status, raw = self.send(long_history())
         self.assertEqual(status, 200)
         self.assertIn(b'event: error', raw)
@@ -287,7 +287,7 @@ class CodexRuleTests(GptCompactionBase):
 
     def setUp(self):
         super().setUp()
-        devinx._gpt_usage.clear()
+        ccproxy._gpt_usage.clear()
 
     def test_reported_usage_triggers_compaction_the_estimate_would_miss(self):
         def answer(body):
@@ -298,7 +298,7 @@ class CodexRuleTests(GptCompactionBase):
                          b'"usage":{"input_tokens":5900,"output_tokens":50}}\n\n')
         self.sidecar.answer = answer
         body = long_history(turns=4, size=1000)
-        self.assertLess(devinx.estimate_tokens(body), 6000)
+        self.assertLess(ccproxy.estimate_tokens(body), 6000)
         self.send(body)
         self.assertEqual(len(self.sidecar.seen), 1)
         body['messages'] += [
@@ -342,7 +342,7 @@ class CodexRuleTests(GptCompactionBase):
 class UsageSnifferTests(unittest.TestCase):
 
     def test_split_lines_and_final_counts(self):
-        sniff = devinx.UsageSniffer()
+        sniff = ccproxy.UsageSniffer()
         stream = (b'event: message_start\ndata: {"type":"message_start","message":'
                   b'{"usage":{"input_tokens":100,"cache_read_input_tokens":900}}}\n\n'
                   b'event: message_delta\ndata: {"type":"message_delta","usage":'
@@ -372,7 +372,7 @@ class ForeignThinkingTests(unittest.TestCase):
                 {'type': 'thinking', 'thinking': 'x', 'signature': 'EqQBanthropic'},
                 {'type': 'text', 'text': 'ok'}]}]}
         before = json.dumps(body)
-        self.assertFalse(devinx.strip_foreign_thinking(body))
+        self.assertFalse(ccproxy.strip_foreign_thinking(body))
         self.assertEqual(json.dumps(body), before)
 
     def test_claude_route_drops_the_block_and_thinking_for_a_tool_turn(self):
@@ -380,7 +380,7 @@ class ForeignThinkingTests(unittest.TestCase):
             {'role': 'user', 'content': 'hi'}, gpt_turn(tool=True),
             {'role': 'user', 'content': [
                 {'type': 'tool_result', 'tool_use_id': 'call_1', 'content': 'x'}]}]}
-        self.assertTrue(devinx.strip_foreign_thinking(body))
+        self.assertTrue(ccproxy.strip_foreign_thinking(body))
         self.assertEqual([b['type'] for b in body['messages'][1]['content']],
                          ['tool_use'])
         self.assertNotIn('thinking', body)
@@ -391,14 +391,14 @@ class ForeignThinkingTests(unittest.TestCase):
             {'role': 'user', 'content': 'next'},
             {'role': 'assistant', 'content': [{'type': 'text', 'text': 'claude'}]},
             {'role': 'user', 'content': 'again'}]}
-        self.assertTrue(devinx.strip_foreign_thinking(body))
+        self.assertTrue(ccproxy.strip_foreign_thinking(body))
         self.assertEqual(body['messages'][1]['content'],
                          [{'type': 'text', 'text': 'done'}])
         self.assertIn('thinking', body)
 
     def test_swe_route_keeps_the_text_without_the_signature(self):
         body = {'messages': [{'role': 'user', 'content': 'hi'}, gpt_turn()]}
-        self.assertTrue(devinx.strip_foreign_thinking(body, keep_text=True))
+        self.assertTrue(ccproxy.strip_foreign_thinking(body, keep_text=True))
         block = body['messages'][1]['content'][0]
         self.assertEqual(block, {'type': 'thinking', 'thinking': 'plan'})
 
@@ -406,30 +406,30 @@ class ForeignThinkingTests(unittest.TestCase):
 class GptContextTests(unittest.TestCase):
 
     def test_default_compaction_thresholds(self):
-        with mock.patch.object(devinx, 'GPT_COMPACT_AT', None):
+        with mock.patch.object(ccproxy, 'GPT_COMPACT_AT', None):
             for model, threshold in (('gpt-6.1-sol', 450000),
                                      ('gpt-6-astra', 244800),
                                      ('gpt-6-luna', 244800)):
                 with self.subTest(model=model):
-                    self.assertEqual(devinx.gpt_compact_at(model), threshold)
+                    self.assertEqual(ccproxy.gpt_compact_at(model), threshold)
 
     def test_explicit_compaction_override_applies_to_every_model(self):
-        with mock.patch.object(devinx, 'GPT_COMPACT_AT', 123456):
-            for model, _ in devinx.GPT_MODELS:
-                self.assertEqual(devinx.gpt_compact_at(model), 123456)
+        with mock.patch.object(ccproxy, 'GPT_COMPACT_AT', 123456):
+            for model, _ in ccproxy.GPT_MODELS:
+                self.assertEqual(ccproxy.gpt_compact_at(model), 123456)
 
     def test_subagent_compaction_uses_each_models_threshold(self):
-        handler = object.__new__(devinx.Handler)
+        handler = object.__new__(ccproxy.Handler)
         for model, threshold in (('gpt-6.1-sol', 450000),
                                  ('gpt-6-astra', 244800),
                                  ('gpt-6-luna', 244800)):
             body = dict(long_history(turns=4, size=1000), model=model)
             for measured, compact in ((threshold - 1, False), (threshold, True)):
                 with self.subTest(model=model, measured=measured), \
-                     mock.patch.object(devinx, 'GPT_COMPACT_AT', None), \
-                     mock.patch.object(devinx, '_gpt_usage', {}), \
-                     mock.patch.object(devinx, 'estimate_tokens', return_value=measured), \
-                     mock.patch.object(devinx, 'compact_body', return_value=body) as summary:
+                     mock.patch.object(ccproxy, 'GPT_COMPACT_AT', None), \
+                     mock.patch.object(ccproxy, '_gpt_usage', {}), \
+                     mock.patch.object(ccproxy, 'estimate_tokens', return_value=measured), \
+                     mock.patch.object(ccproxy, 'compact_body', return_value=body) as summary:
                     sent, committed = handler.compact_gpt(body)
                     self.assertIs(sent, body)
                     self.assertFalse(committed)
@@ -481,12 +481,12 @@ class AgentEffortTests(unittest.TestCase):
 
     def test_low_effort_runs_as_medium(self):
         body = {'output_config': {'effort': 'low'}}
-        self.assertTrue(devinx.gpt_raise_low_effort(body))
+        self.assertTrue(ccproxy.gpt_raise_low_effort(body))
         self.assertEqual(body['output_config']['effort'], 'medium')
         for effort in ('medium', 'high', 'xhigh', 'max'):
             body = {'output_config': {'effort': effort}}
-            self.assertFalse(devinx.gpt_raise_low_effort(body))
-        self.assertFalse(devinx.gpt_raise_low_effort({}))
+            self.assertFalse(ccproxy.gpt_raise_low_effort(body))
+        self.assertFalse(ccproxy.gpt_raise_low_effort({}))
 
 if __name__ == '__main__':
     unittest.main()

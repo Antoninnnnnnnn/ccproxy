@@ -25,8 +25,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 # These tests exercise the SWE-2 route, which is off by default.
-os.environ.setdefault("DEVINX_SWE", "1")
-import devinx
+os.environ.setdefault("CCPROXY_SWE", "1")
+import ccproxy
 
 
 def events(raw):
@@ -47,12 +47,12 @@ class ProtocolTests(unittest.TestCase):
         for text, expected in [('20 seconds', 20), ('11 minutes', 660),
                                ('1 hour', 3600), ('0 seconds', 0)]:
             with self.subTest(text=text):
-                self.assertEqual(devinx.anthropic_error(
+                self.assertEqual(ccproxy.anthropic_error(
                     'resource_exhausted: reset in ' + text)[3], expected)
-        self.assertIsNone(devinx.anthropic_error('resource_exhausted: busy')[3])
+        self.assertIsNone(ccproxy.anthropic_error('resource_exhausted: busy')[3])
 
     def test_error_signature_is_shared(self):
-        for emitter in (devinx.AnthropicStream, devinx.ResponsesStream):
+        for emitter in (ccproxy.AnthropicStream, ccproxy.ResponsesStream):
             with self.subTest(emitter=emitter.__name__):
                 buf = io.BytesIO()
                 out = emitter(buf, 'swe-2-max')
@@ -65,7 +65,7 @@ class ProtocolTests(unittest.TestCase):
 
     def test_responses_truncation_has_incomplete_details(self):
         buf = io.BytesIO()
-        out = devinx.ResponsesStream(buf, 'swe-2-max')
+        out = ccproxy.ResponsesStream(buf, 'swe-2-max')
         out.start()
         out.text('partial')
         out.finish('max_tokens', {'input_tokens': 1, 'output_tokens': 2})
@@ -80,18 +80,18 @@ class ProtocolTests(unittest.TestCase):
     def test_responses_success_stays_completed(self):
         for stop in ('end_turn', 'tool_use'):
             buf = io.BytesIO()
-            out = devinx.ResponsesStream(buf, 'swe-2-max')
+            out = ccproxy.ResponsesStream(buf, 'swe-2-max')
             out.start()
             out.finish(stop, {'input_tokens': 1, 'output_tokens': 2})
             self.assertEqual(events(buf.getvalue())[-1]['type'], 'response.completed')
 
     def test_early_responses_error_has_http_status(self):
-        handler = object.__new__(devinx.Handler)
+        handler = object.__new__(ccproxy.Handler)
         handler.wfile = io.BytesIO()
         handler.send_error_json = mock.Mock()
-        with mock.patch.object(devinx, 'responses_to_messages', return_value=(
+        with mock.patch.object(ccproxy, 'responses_to_messages', return_value=(
                 {'model': 'swe-2-max', 'stream': True}, set())), \
-             mock.patch.object(devinx, 'run_swe', return_value=(
+             mock.patch.object(ccproxy, 'run_swe', return_value=(
                 None, 'unauthenticated: expired credential')):
             handler.serve_swe_responses({'model': 'swe-2-max', 'stream': True})
         handler.send_error_json.assert_called_once_with(
@@ -99,9 +99,9 @@ class ProtocolTests(unittest.TestCase):
         self.assertTrue(handler.close_connection)
 
     def test_nonstreaming_responses_still_refused(self):
-        handler = object.__new__(devinx.Handler)
+        handler = object.__new__(ccproxy.Handler)
         handler.send_error_json = mock.Mock()
-        with mock.patch.object(devinx, 'run_swe') as run:
+        with mock.patch.object(ccproxy, 'run_swe') as run:
             handler.serve_swe_responses({'model': 'swe-2-max', 'stream': False})
         self.assertEqual(handler.send_error_json.call_args.args[0], 400)
         run.assert_not_called()
@@ -112,22 +112,22 @@ class TurnTests(unittest.TestCase):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
         self.account = {'name': 'test', 'blocked_until': 0}
-        self.stack.enter_context(mock.patch.object(devinx, 'compact_body', side_effect=lambda b: b))
-        self.stack.enter_context(mock.patch.object(devinx, 'build_request', return_value=(
+        self.stack.enter_context(mock.patch.object(ccproxy, 'compact_body', side_effect=lambda b: b))
+        self.stack.enter_context(mock.patch.object(ccproxy, 'build_request', return_value=(
             SimpleNamespace(cascade_id='test-conversation'), 'swe-2-max')))
-        self.stack.enter_context(mock.patch.object(devinx, 'claim_account', return_value=(self.account, 0)))
-        self.stack.enter_context(mock.patch.object(devinx, 'KEEPALIVE_EVERY', 0))
-        self.stack.enter_context(mock.patch.object(devinx, 'paced', return_value=contextlib.nullcontext()))
+        self.stack.enter_context(mock.patch.object(ccproxy, 'claim_account', return_value=(self.account, 0)))
+        self.stack.enter_context(mock.patch.object(ccproxy, 'KEEPALIVE_EVERY', 0))
+        self.stack.enter_context(mock.patch.object(ccproxy, 'paced', return_value=contextlib.nullcontext()))
         self.body = {'model': 'swe-2-max', 'stream': True, 'messages': []}
 
-    def run_turn(self, frames, emitter=devinx.AnthropicStream):
+    def run_turn(self, frames, emitter=ccproxy.AnthropicStream):
         buf, outcome = io.BytesIO(), {}
-        with mock.patch.object(devinx, 'chat_stream', return_value=iter(frames)):
-            result = devinx.run_swe(self.body, buf, emitter, outcome=outcome)
+        with mock.patch.object(ccproxy, 'chat_stream', return_value=iter(frames)):
+            result = ccproxy.run_swe(self.body, buf, emitter, outcome=outcome)
         return result, buf.getvalue(), outcome
 
     def test_both_streams_report_midstream_errors(self):
-        for emitter in (devinx.AnthropicStream, devinx.ResponsesStream):
+        for emitter in (ccproxy.AnthropicStream, ccproxy.ResponsesStream):
             with self.subTest(emitter=emitter.__name__):
                 result, raw, outcome = self.run_turn([
                     (message('partial'), None), (None, 'unavailable: unavailable')], emitter)
@@ -141,14 +141,14 @@ class TurnTests(unittest.TestCase):
         valid = SimpleNamespace(id='good', name='Read', arguments_json='{"path":"x"}')
         invalid = SimpleNamespace(id='bad', name='Write', arguments_json='{"path":')
         result, raw, outcome = self.run_turn([(message(tools=[valid, invalid]), None)],
-                                             devinx.ResponsesStream)
+                                             ccproxy.ResponsesStream)
         self.assertEqual(result, (None, None))
         calls = [e['item'] for e in events(raw) if e['type'] == 'response.output_item.added']
         self.assertEqual([c['call_id'] for c in calls], ['good'])
         self.assertEqual(events(raw)[-1]['type'], 'response.incomplete')
 
     def test_build_failure_is_http_before_commit(self):
-        with mock.patch.object(devinx, 'build_request', side_effect=ValueError('broken')):
+        with mock.patch.object(ccproxy, 'build_request', side_effect=ValueError('broken')):
             result, raw, outcome = self.run_turn([])
         self.assertEqual(raw, b'')
         self.assertIn('request build:', result[1])
@@ -156,30 +156,30 @@ class TurnTests(unittest.TestCase):
 
     def test_heartbeat_is_armed_before_compaction_and_error_stays_sse(self):
         buf = io.BytesIO()
-        class InstantHeartbeat(devinx.AnthropicStream):
+        class InstantHeartbeat(ccproxy.AnthropicStream):
             def arm(self):
                 self.start()
         def compact(body):
             self.assertIn(b'HTTP/1.1 200', buf.getvalue())
             return body
-        with mock.patch.object(devinx, 'compact_body', side_effect=compact), \
-             mock.patch.object(devinx, 'build_request', side_effect=ValueError('broken')):
-            response, err = devinx.run_swe(self.body, buf, InstantHeartbeat)
+        with mock.patch.object(ccproxy, 'compact_body', side_effect=compact), \
+             mock.patch.object(ccproxy, 'build_request', side_effect=ValueError('broken')):
+            response, err = ccproxy.run_swe(self.body, buf, InstantHeartbeat)
         self.assertIsNone(err)
         self.assertEqual(buf.getvalue().count(b'HTTP/1.1 '), 1)
         self.assertIn(b'event: error', buf.getvalue())
         self.assertIn(b'event: message_stop', buf.getvalue())
 
     def test_transport_retry_after_only_heartbeat_keeps_one_response(self):
-        class InstantHeartbeat(devinx.AnthropicStream):
+        class InstantHeartbeat(ccproxy.AnthropicStream):
             def arm(self):
                 self.start()
         attempts = [iter([(None, 'upstream ConnectionError: dropped')]),
                     iter([(message('complete'), None)])]
         buf = io.BytesIO()
-        with mock.patch.object(devinx, 'chat_stream', side_effect=attempts) as chat, \
-             mock.patch.object(devinx.time, 'sleep'):
-            result = devinx.run_swe(self.body, buf, InstantHeartbeat)
+        with mock.patch.object(ccproxy, 'chat_stream', side_effect=attempts) as chat, \
+             mock.patch.object(ccproxy.time, 'sleep'):
+            result = ccproxy.run_swe(self.body, buf, InstantHeartbeat)
         self.assertEqual(chat.call_count, 2)
         self.assertEqual(result, (None, None))
         self.assertEqual(buf.getvalue().count(b'HTTP/1.1 '), 1)
@@ -188,38 +188,38 @@ class TurnTests(unittest.TestCase):
         self.assertNotIn(b'event: error', buf.getvalue())
 
     def test_no_retry_after_content_reached_client(self):
-        with mock.patch.object(devinx, 'chat_stream', return_value=iter([
+        with mock.patch.object(ccproxy, 'chat_stream', return_value=iter([
                 (message('partial'), None), (None, 'upstream ConnectionError: dropped')])) as chat:
-            devinx.run_swe(self.body, io.BytesIO())
+            ccproxy.run_swe(self.body, io.BytesIO())
         self.assertEqual(chat.call_count, 1)
 
     def test_emitter_released_on_unexpected_failure(self):
-        out = devinx.AnthropicStream(io.BytesIO(), 'swe-2-max')
-        with mock.patch.object(devinx, '_run_swe', side_effect=RuntimeError('unexpected')):
+        out = ccproxy.AnthropicStream(io.BytesIO(), 'swe-2-max')
+        with mock.patch.object(ccproxy, '_run_swe', side_effect=RuntimeError('unexpected')):
             with self.assertRaises(RuntimeError):
-                devinx.run_swe(self.body, out.w, lambda *args: out)
+                ccproxy.run_swe(self.body, out.w, lambda *args: out)
         self.assertTrue(out._done.is_set())
 
 
 class FrameTests(unittest.TestCase):
     def test_valid_plain_and_gzip_frames(self):
         raw = b'{"answer":"ok"}'
-        self.assertEqual(devinx._frame_payload(raw, False), raw)
-        self.assertEqual(devinx._frame_payload(gzip.compress(raw), True), raw)
+        self.assertEqual(ccproxy._frame_payload(raw, False), raw)
+        self.assertEqual(ccproxy._frame_payload(gzip.compress(raw), True), raw)
 
     def test_decoded_size_limit(self):
         for compressed in (False, True):
             raw = b'a' * 1000
             payload = gzip.compress(raw) if compressed else raw
-            with mock.patch.object(devinx, 'MAX_INFLATED_FRAME_BYTES', 50):
+            with mock.patch.object(ccproxy, 'MAX_INFLATED_FRAME_BYTES', 50):
                 with self.assertRaisesRegex(ValueError, 'decoded size limit'):
-                    devinx._frame_payload(payload, compressed)
+                    ccproxy._frame_payload(payload, compressed)
 
     def test_gzip_concatenation_is_also_bounded(self):
         payload = gzip.compress(b'a' * 30) + gzip.compress(b'b' * 30)
-        with mock.patch.object(devinx, 'MAX_INFLATED_FRAME_BYTES', 50):
+        with mock.patch.object(ccproxy, 'MAX_INFLATED_FRAME_BYTES', 50):
             with self.assertRaises(ValueError):
-                devinx._frame_payload(payload, True)
+                ccproxy._frame_payload(payload, True)
 
     def test_declared_frame_size_is_rejected_before_buffering_body(self):
         req = SimpleNamespace(metadata=SimpleNamespace(), chat_message_prompts=[],
@@ -227,15 +227,15 @@ class FrameTests(unittest.TestCase):
                               SerializeToString=lambda: b'test')
         response = mock.Mock(status_code=200)
         response.iter_content.return_value = iter([b'\x00' + struct.pack('>I', 1000)])
-        with mock.patch.object(devinx, 'MAX_FRAME_BYTES', 50), \
-             mock.patch.object(devinx, 'get_jwt', return_value=('test-jwt', None)), \
-             mock.patch.object(devinx.SESSION, 'post', return_value=response):
+        with mock.patch.object(ccproxy, 'MAX_FRAME_BYTES', 50), \
+             mock.patch.object(ccproxy, 'get_jwt', return_value=('test-jwt', None)), \
+             mock.patch.object(ccproxy.SESSION, 'post', return_value=response):
             with self.assertRaisesRegex(ValueError, 'wire size limit'):
-                list(devinx.chat_stream(req, {'name': 'test', 'key': 'test'}))
+                list(ccproxy.chat_stream(req, {'name': 'test', 'key': 'test'}))
         response.close.assert_called_once()
 
     def test_adapter_does_not_implicitly_replay_post_reads(self):
-        retry = devinx.SESSION.get_adapter('https://').max_retries
+        retry = ccproxy.SESSION.get_adapter('https://').max_retries
         self.assertNotIn('POST', retry.allowed_methods)
         self.assertIn('GET', retry.allowed_methods)
         self.assertGreater(retry.connect, 0)
@@ -244,7 +244,7 @@ class FrameTests(unittest.TestCase):
 class HTTPFramingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.server = devinx.Server(('127.0.0.1', 0), devinx.Handler)
+        cls.server = ccproxy.Server(('127.0.0.1', 0), ccproxy.Handler)
         cls.thread = threading.Thread(target=cls.server.serve_forever,
                                       kwargs={'poll_interval': 0.02}, daemon=True)
         cls.thread.start()
@@ -279,7 +279,7 @@ class HTTPFramingTests(unittest.TestCase):
                 self.assertEqual(self.request(lengths, transfer=transfer)[0], 400)
 
     def test_oversized_body_is_refused_before_read(self):
-        self.assertEqual(self.request([str(devinx.MAX_BODY_BYTES + 1)])[0], 413)
+        self.assertEqual(self.request([str(ccproxy.MAX_BODY_BYTES + 1)])[0], 413)
 
     def test_valid_count_tokens_request_still_works(self):
         data = json.dumps({'model': 'swe-2-max', 'messages': [
@@ -291,18 +291,18 @@ class HTTPFramingTests(unittest.TestCase):
 
 class DiagnosticsTests(unittest.TestCase):
     def test_stats_extractor_inherits_the_actual_log_path(self):
-        handler = object.__new__(devinx.Handler)
+        handler = object.__new__(ccproxy.Handler)
         handler.path = '/api/stats'
         handler.send_json = mock.Mock()
-        with mock.patch.object(devinx, '_stats', {}), \
-             mock.patch.object(devinx, 'DATA_DIR', '/custom/data'), \
+        with mock.patch.object(ccproxy, '_stats', {}), \
+             mock.patch.object(ccproxy, 'DATA_DIR', '/custom/data'), \
              mock.patch.dict(os.environ, {}, clear=True), \
-             mock.patch.object(devinx, '_log_tail', return_value=[]), \
-             mock.patch.object(devinx.subprocess, 'run', return_value=SimpleNamespace(
+             mock.patch.object(ccproxy, '_log_tail', return_value=[]), \
+             mock.patch.object(ccproxy.subprocess, 'run', return_value=SimpleNamespace(
                  returncode=0, stdout='{}', stderr='')) as run:
             handler.serve_stats()
-        self.assertEqual(run.call_args.kwargs['env']['DEVINX_LOG'],
-                         os.path.join('/custom/data', 'devinx.log'))
+        self.assertEqual(run.call_args.kwargs['env']['CCPROXY_LOG'],
+                         os.path.join('/custom/data', 'ccproxy.log'))
 
     def test_compaction_shape_logging_does_not_quote_content(self):
         body = {'model': 'swe-2-max', 'messages': [
@@ -310,11 +310,11 @@ class DiagnosticsTests(unittest.TestCase):
             {'role': 'assistant' if i % 2 else 'user',
              'content': 'PRIVATE-CONTENT-MARKER-' * 10} for i in range(12)]}
         log = io.StringIO()
-        with mock.patch.object(devinx, 'COMPACT_AT', 200), \
-             mock.patch.object(devinx, '_summaries', {}), \
-             mock.patch.object(devinx, 'summarise_turns', return_value='SUMMARY'), \
+        with mock.patch.object(ccproxy, 'COMPACT_AT', 200), \
+             mock.patch.object(ccproxy, '_summaries', {}), \
+             mock.patch.object(ccproxy, 'summarise_turns', return_value='SUMMARY'), \
              contextlib.redirect_stdout(log):
-            devinx.compact_body(body)
+            ccproxy.compact_body(body)
         self.assertIn('compaction:', log.getvalue())
         self.assertNotIn('PRIVATE-CONTENT-MARKER', log.getvalue())
 
@@ -324,8 +324,8 @@ class DrainTests(unittest.TestCase):
     def test_busy_sigterm_closes_both_listeners_and_finishes_accepted_turn(self):
         script = r'''
 import json, threading, time
-import devinx
-class Slow(devinx.Handler):
+import ccproxy
+class Slow(ccproxy.Handler):
     def _do_POST(self):
         self.send_response(200)
         self.send_header('content-length', '4')
@@ -335,11 +335,11 @@ class Slow(devinx.Handler):
         time.sleep(2)
         self.wfile.write(b'done')
         self.close_connection = True
-srv = devinx.Server(('127.0.0.1', 0), Slow)
-extra = devinx.Server(('127.0.0.1', 0), devinx.DashboardHandler)
+srv = ccproxy.Server(('127.0.0.1', 0), Slow)
+extra = ccproxy.Server(('127.0.0.1', 0), ccproxy.DashboardHandler)
 threading.Thread(target=extra.serve_forever, daemon=True).start()
-devinx.DRAIN_SECONDS = 5
-devinx.drain_and_exit(srv, (extra,))
+ccproxy.DRAIN_SECONDS = 5
+ccproxy.drain_and_exit(srv, (extra,))
 print(json.dumps([srv.server_address[1], extra.server_address[1]]), flush=True)
 srv.serve_forever(poll_interval=0.02)
 '''
@@ -380,7 +380,7 @@ srv.serve_forever(poll_interval=0.02)
 
 class OutcomeLoggingTests(unittest.TestCase):
     def _capture(self, responses, fail=False):
-        handler = object.__new__(devinx.Handler)
+        handler = object.__new__(ccproxy.Handler)
         handler.wfile = io.BytesIO()
         def execute(*args, outcome=None):
             if fail:
@@ -388,7 +388,7 @@ class OutcomeLoggingTests(unittest.TestCase):
             outcome['status'] = 'stream_error'
             return None, None
         log = io.StringIO()
-        with mock.patch.object(devinx, 'run_swe', side_effect=execute), \
+        with mock.patch.object(ccproxy, 'run_swe', side_effect=execute), \
              contextlib.redirect_stdout(log):
             method = handler.serve_swe_responses if responses else handler.serve_swe
             method({'model': 'swe-2-max', 'stream': True})

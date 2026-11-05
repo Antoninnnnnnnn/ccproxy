@@ -2,7 +2,7 @@
 """Regression tests for the plugin hook fixes in this pass (H2-H4, H9).
 
 One test per finding: reverting the matching fix must fail the test.
-Hermetic - DEVINX_DATA always points at a throwaway temp directory, so
+Hermetic - CCPROXY_DATA always points at a throwaway temp directory, so
 nothing here ever touches the real HOME.
 
     .venv/bin/python -m unittest tests.test_hooks_fixes -v
@@ -30,12 +30,12 @@ OWNERSHIP_GUARD = os.path.join(HOOKS_DIR, "ownership_guard.py")
 
 
 class HermeticHookCase(unittest.TestCase):
-    """A throwaway DEVINX_DATA for every test, never the real HOME."""
+    """A throwaway CCPROXY_DATA for every test, never the real HOME."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.env = dict(os.environ, DEVINX_DATA=self._tmp.name)
+        self.env = dict(os.environ, CCPROXY_DATA=self._tmp.name)
         self.session = "test-" + os.urandom(6).hex()
 
     def _call(self, tool, args, hook_event=None, session=None):
@@ -85,7 +85,7 @@ class SessionStartClearsStateTests(HermeticHookCase):
     def test_the_lock_file_itself_is_never_removed_by_a_clear(self):
         args = {"file_path": "/a/b.py", "old_string": "X", "new_string": "Y"}
         self.assertEqual(self._call("Edit", args).returncode, 0)
-        with mock.patch.dict(os.environ, {"DEVINX_DATA": self._tmp.name}):
+        with mock.patch.dict(os.environ, {"CCPROXY_DATA": self._tmp.name}):
             lock_path = edit_loop_guard.state_path(self.session) + ".lock"
         self.assertTrue(os.path.exists(lock_path))
         self.assertEqual(self._session_start("resume").returncode, 0)
@@ -186,7 +186,7 @@ class ConcurrentAttemptsAreCountedAccuratelyTests(HermeticHookCase):
         with concurrent.futures.ThreadPoolExecutor(max_workers=40) as pool:
             self.assertEqual(set(pool.map(fail, range(40))), {0})
         from unittest import mock
-        with mock.patch.dict(os.environ, {"DEVINX_DATA": self._tmp.name}):
+        with mock.patch.dict(os.environ, {"CCPROXY_DATA": self._tmp.name}):
             state = edit_loop_guard.state_path(self.session)
         with open(state) as fh:
             counts = [v["n"] for v in json.load(fh).values()]
@@ -199,7 +199,7 @@ class StatePathIsPrivateTests(HermeticHookCase):
     predictable shared-/tmp name, and old files get cleaned up."""
 
     def test_state_dir_is_not_the_shared_tmp_root(self):
-        with mock.patch.dict(os.environ, {"DEVINX_DATA": self._tmp.name}):
+        with mock.patch.dict(os.environ, {"CCPROXY_DATA": self._tmp.name}):
             path = edit_loop_guard.state_path(self.session)
         self.assertTrue(path.startswith(self._tmp.name))
         self.assertNotEqual(os.path.dirname(path), tempfile.gettempdir())
@@ -207,13 +207,13 @@ class StatePathIsPrivateTests(HermeticHookCase):
     def test_state_dir_is_mode_0700_on_posix(self):
         if sys.platform == "win32":
             self.skipTest("POSIX permission bits")
-        with mock.patch.dict(os.environ, {"DEVINX_DATA": self._tmp.name}):
+        with mock.patch.dict(os.environ, {"CCPROXY_DATA": self._tmp.name}):
             directory = edit_loop_guard._state_dir()
         mode = os.stat(directory).st_mode & 0o777
         self.assertEqual(mode, 0o700)
 
     def test_old_state_files_are_cleaned_up(self):
-        with mock.patch.dict(os.environ, {"DEVINX_DATA": self._tmp.name}):
+        with mock.patch.dict(os.environ, {"CCPROXY_DATA": self._tmp.name}):
             directory = edit_loop_guard._state_dir()
         stale = os.path.join(directory, "ancient.json")
         with open(stale, "w") as fh:
@@ -326,14 +326,14 @@ class FailOpenOnUnexpectedJsonTests(unittest.TestCase):
         # os.path.realpath() raises ValueError on an embedded NUL.
         event = json.dumps({"tool_name": "Edit", "cwd": "/repo",
                             "tool_input": {"file_path": "/repo/a\x00b.py"}})
-        env = dict(os.environ, DEVINX_OWNED_PATHS="/repo")
+        env = dict(os.environ, CCPROXY_OWNED_PATHS="/repo")
         r = subprocess.run([sys.executable, OWNERSHIP_GUARD], input=event,
                            capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stderr, "")
 
     def test_edit_loop_guard_survives_an_unwritable_state_directory(self):
-        # DEVINX_DATA pointing at a plain file: _state_dir()'s makedirs()
+        # CCPROXY_DATA pointing at a plain file: _state_dir()'s makedirs()
         # fails, and the next os.open() for the lock file must not raise.
         with tempfile.TemporaryDirectory() as tmp:
             blocker = os.path.join(tmp, "blocks-the-hooks-subdir")
@@ -342,7 +342,7 @@ class FailOpenOnUnexpectedJsonTests(unittest.TestCase):
             event = json.dumps({"session_id": "s", "tool_name": "Edit",
                                 "tool_input": {"file_path": "/a/b.py",
                                               "old_string": "X", "new_string": "Y"}})
-            env = dict(os.environ, DEVINX_DATA=blocker)
+            env = dict(os.environ, CCPROXY_DATA=blocker)
             r = subprocess.run([sys.executable, EDIT_GUARD], input=event,
                                capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 0)

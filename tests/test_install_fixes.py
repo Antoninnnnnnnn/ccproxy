@@ -41,20 +41,20 @@ class CodexProfileEscapingTests(unittest.TestCase):
                      contextlib.redirect_stdout(io.StringIO()):
                     install.install_codex(force=True)
 
-                profile = os.path.join(home, "devinx.config.toml")
+                profile = os.path.join(home, "ccproxy.config.toml")
                 with open(profile, encoding="utf-8") as fh:
                     text = fh.read()
                 parsed = tomllib.loads(text)
-                self.assertEqual(parsed["marketplaces"]["devinx"]["source"],
+                self.assertEqual(parsed["marketplaces"]["ccproxy"]["source"],
                                  os.path.join(base, "codex", "marketplace"))
 
                 # The -c override handed to `codex plugin add` must round-trip
                 # through the same escaping, not a second, unescaped copy.
                 argv = fake_run.call_args.args[0]
                 source_arg = next(a for a in argv
-                                  if a.startswith("marketplaces.devinx.source="))
+                                  if a.startswith("marketplaces.ccproxy.source="))
                 self.assertEqual(
-                    tomllib.loads(source_arg)["marketplaces"]["devinx"]["source"],
+                    tomllib.loads(source_arg)["marketplaces"]["ccproxy"]["source"],
                     os.path.join(base, "codex", "marketplace"))
 
 
@@ -71,22 +71,22 @@ class ShadowDetectionTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"HOME": home}, clear=False), \
                  mock.patch.object(install.shutil, "which", return_value=None), \
                  contextlib.redirect_stdout(stdout):
-                install.warn_shadowed("/usr/local/bin/devinx")
+                install.warn_shadowed("/usr/local/bin/ccproxy")
             return stdout.getvalue()
 
     def test_a_shadowing_function_that_does_not_delegate_warns(self):
-        out = self._run("devinx() { echo not really devinx here; }\n")
+        out = self._run("ccproxy() { echo not really ccproxy here; }\n")
         self.assertIn("[warn]", out)
         self.assertIn("never run", out)
 
     def test_a_shadowing_function_that_delegates_is_fine(self):
         out = self._run(
-            'devinx() { exec ~/devinx/.venv/bin/python ~/devinx/launcher.py "$@"; }\n')
+            'ccproxy() { exec ~/ccproxy/.venv/bin/python ~/ccproxy/launcher.py "$@"; }\n')
         self.assertIn("[ ok ]", out)
         self.assertNotIn("[warn]", out)
 
     def test_a_shadowing_alias_that_does_not_delegate_warns(self):
-        out = self._run("alias devinx='echo hi'\n")
+        out = self._run("alias ccproxy='echo hi'\n")
         self.assertIn("[warn]", out)
 
 
@@ -136,7 +136,7 @@ class SmokeHardeningTests(unittest.TestCase):
                     with self.assertRaises(SystemExit):
                         install.smoke("py", have_credential=False)
         env = fake_popen.call_args.kwargs["env"]
-        self.assertEqual(env["DEVINX_DASHBOARD_PORT"], "0")
+        self.assertEqual(env["CCPROXY_DASHBOARD_PORT"], "0")
         die.assert_called_once()
         self.assertIn("could not reach", die.call_args.args[0])
 

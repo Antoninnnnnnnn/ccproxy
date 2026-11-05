@@ -3,7 +3,7 @@
 Hermetic like the rest of the suite: fake upstreams, fake credentials, local
 sockets on port 0, and nothing that reaches a real service. Every test that
 touches the credential machinery patches the account list, the credential
-search and the DEVINX_API_KEY(S) variables, so a real login on this machine is
+search and the CCPROXY_API_KEY(S) variables, so a real login on this machine is
 never read or changed.
 """
 import contextlib
@@ -21,8 +21,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 # These tests exercise the SWE-2 route, which is off by default.
-os.environ.setdefault("DEVINX_SWE", "1")
-import devinx
+os.environ.setdefault("CCPROXY_SWE", "1")
+import ccproxy
 
 RATE_ZERO = ("upstream trailer error on a: resource_exhausted: Reached the "
              "limit. Your limit will reset in 0 seconds.")
@@ -45,10 +45,10 @@ def fake_accounts(*names):
 def isolated_accounts(accounts):
     """The credential machinery pointed at test data only."""
     env = {k: v for k, v in os.environ.items()
-           if k not in ('DEVINX_API_KEYS', 'DEVINX_API_KEY')}
-    with mock.patch.object(devinx, '_accounts', accounts), \
-         mock.patch.object(devinx, '_turn', {'n': 0}), \
-         mock.patch.object(devinx, '_credential_files', return_value=[]), \
+           if k not in ('CCPROXY_API_KEYS', 'CCPROXY_API_KEY')}
+    with mock.patch.object(ccproxy, '_accounts', accounts), \
+         mock.patch.object(ccproxy, '_turn', {'n': 0}), \
+         mock.patch.object(ccproxy, '_credential_files', return_value=[]), \
          mock.patch.dict(os.environ, env, clear=True):
         yield accounts
 
@@ -76,8 +76,8 @@ class ResetInZeroSecondsTests(unittest.TestCase):
         self.sleeps = Sleeps()
         for name, value in {'RATE_WAIT_BUDGET': self.BUDGET, 'RATE_FLOOR': 3.0,
                             'KEEPALIVE_EVERY': 0}.items():
-            self.stack.enter_context(mock.patch.object(devinx, name, value))
-        self.stack.enter_context(mock.patch.object(devinx.time, 'sleep', self.sleeps))
+            self.stack.enter_context(mock.patch.object(ccproxy, name, value))
+        self.stack.enter_context(mock.patch.object(ccproxy.time, 'sleep', self.sleeps))
         self.stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
 
     def refusing(self):
@@ -92,25 +92,25 @@ class ResetInZeroSecondsTests(unittest.TestCase):
         calls, chat = self.refusing()
         body = {'model': 'swe-2-max', 'stream': stream, 'messages': []}
         with isolated_accounts(accounts), \
-             mock.patch.object(devinx, 'compact_body', side_effect=lambda b: b), \
-             mock.patch.object(devinx, 'build_request', return_value=(
+             mock.patch.object(ccproxy, 'compact_body', side_effect=lambda b: b), \
+             mock.patch.object(ccproxy, 'build_request', return_value=(
                  SimpleNamespace(cascade_id='test'), 'swe-2-max')), \
-             mock.patch.object(devinx, 'paced', return_value=contextlib.nullcontext()), \
-             mock.patch.object(devinx, 'chat_stream', chat):
-            result = devinx.run_swe(body, io.BytesIO() if stream else None)
+             mock.patch.object(ccproxy, 'paced', return_value=contextlib.nullcontext()), \
+             mock.patch.object(ccproxy, 'chat_stream', chat):
+            result = ccproxy.run_swe(body, io.BytesIO() if stream else None)
         return calls, result
 
     def assert_paced(self, calls, accounts):
         # One call per credential per floor at the very most, over the budget.
-        bound = len(accounts) * (self.BUDGET / devinx.RATE_FLOOR + 1) + 1
+        bound = len(accounts) * (self.BUDGET / ccproxy.RATE_FLOOR + 1) + 1
         self.assertLessEqual(len(calls), bound, f'{len(calls)} calls, no pause')
-        self.assertGreaterEqual(self.sleeps.total, self.BUDGET - devinx.RATE_FLOOR - 1)
+        self.assertGreaterEqual(self.sleeps.total, self.BUDGET - ccproxy.RATE_FLOOR - 1)
         # A credential is never asked again before a pause of at least the
         # floor — except for the one try the end of the budget may cut short.
         last = {}
         for name, at in calls:
-            if name in last and at < self.BUDGET - devinx.RATE_FLOOR:
-                self.assertGreaterEqual(at - last[name], devinx.RATE_FLOOR - 1e-6)
+            if name in last and at < self.BUDGET - ccproxy.RATE_FLOOR:
+                self.assertGreaterEqual(at - last[name], ccproxy.RATE_FLOOR - 1e-6)
             last[name] = at
 
     def test_turn_with_one_account_waits_instead_of_handing_back(self):
@@ -137,9 +137,9 @@ class ResetInZeroSecondsTests(unittest.TestCase):
                 accounts = fake_accounts(*names)
                 calls, chat = self.refusing()
                 with isolated_accounts(accounts), \
-                     mock.patch.object(devinx, 'build_request', lambda b, **k: (None, None)), \
-                     mock.patch.object(devinx, 'chat_stream', chat):
-                    out = devinx.summarise_turns(
+                     mock.patch.object(ccproxy, 'build_request', lambda b, **k: (None, None)), \
+                     mock.patch.object(ccproxy, 'chat_stream', chat):
+                    out = ccproxy.summarise_turns(
                         [{'role': 'user', 'content': [{'type': 'text', 'text': 'x'}]}],
                         'swe-2-max', 'sys')
                 self.assertIn('Mechanical record', out)
@@ -150,26 +150,26 @@ class ResetInZeroSecondsTests(unittest.TestCase):
         now = time.time()
         accounts[1]['blocked_until'] = now + 1800
         with isolated_accounts(accounts):
-            devinx.block_account(accounts[0], 5)
-            acct, until = devinx.claim_account(avoid=accounts[0])
+            ccproxy.block_account(accounts[0], 5)
+            acct, until = ccproxy.claim_account(avoid=accounts[0])
         self.assertIsNone(acct)
         self.assertLess(until, 10, 'waited for the other account instead')
 
     def test_block_floor(self):
         acct = fake_accounts('a')[0]
-        devinx.block_account(acct, 0)
+        ccproxy.block_account(acct, 0)
         self.assertGreaterEqual(acct['blocked_until'] - time.time(),
-                                devinx.RATE_FLOOR - 0.5)
+                                ccproxy.RATE_FLOOR - 0.5)
         # The hint the client gets is still what the upstream said.
-        self.assertEqual(devinx.anthropic_error(
+        self.assertEqual(ccproxy.anthropic_error(
             'resource_exhausted: reset in 0 seconds')[3], 0)
 
 
 class LiveServer:
-    """devinx's real Handler on an ephemeral loopback port."""
+    """ccproxy's real Handler on an ephemeral loopback port."""
 
     def __init__(self, handler=None):
-        self.server = devinx.Server(('127.0.0.1', 0), handler or devinx.Handler)
+        self.server = ccproxy.Server(('127.0.0.1', 0), handler or ccproxy.Handler)
         self.thread = threading.Thread(target=self.server.serve_forever,
                                        kwargs={'poll_interval': 0.02}, daemon=True)
         self.thread.start()
@@ -199,7 +199,7 @@ class CodexCatalogTests(unittest.TestCase):
         self.addCleanup(self.live.close)
         upstream = mock.Mock(status_code=200)
         upstream.json.return_value = {'models': [{'slug': 'gpt-test'}]}
-        patcher = mock.patch.object(devinx.SESSION, 'get', return_value=upstream)
+        patcher = mock.patch.object(ccproxy.SESSION, 'get', return_value=upstream)
         self.get = patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -230,7 +230,7 @@ class CodexCatalogTests(unittest.TestCase):
         self.assertIn('gpt-test', [m.get('slug') for m in body['models']])
         self.get.assert_called_once()
         url = self.get.call_args.args[0]
-        self.assertTrue(url.startswith(devinx.CODEX_UPSTREAM + '/models?client_version='))
+        self.assertTrue(url.startswith(ccproxy.CODEX_UPSTREAM + '/models?client_version='))
         sent = {k.lower(): v for k, v in self.get.call_args.kwargs['headers'].items()}
         self.assertEqual(sent['authorization'], 'Bearer chatgpt-token')
         self.assertEqual(sent['chatgpt-account-id'], 'acct')
@@ -264,7 +264,7 @@ class ResponsesUsageTests(unittest.TestCase):
 
     def test_cached_tokens_are_inside_input_tokens(self):
         buf = io.BytesIO()
-        out = devinx.ResponsesStream(buf, 'swe-2-max')
+        out = ccproxy.ResponsesStream(buf, 'swe-2-max')
         out.start()
         out.finish('end_turn', {'input_tokens': 100, 'output_tokens': 5,
                                 'cache_read_input_tokens': 1000,
@@ -281,13 +281,13 @@ class ResponsesKeepaliveTests(unittest.TestCase):
     """P5: the Codex route keeps a silent stream alive with its own events."""
 
     def setUp(self):
-        patcher = mock.patch.object(devinx, 'KEEPALIVE_EVERY', 1)
+        patcher = mock.patch.object(ccproxy, 'KEEPALIVE_EVERY', 1)
         patcher.start()
         self.addCleanup(patcher.stop)
 
     def test_a_silent_turn_is_kept_alive_with_existing_events_only(self):
         w = Wire()
-        out = devinx.ResponsesStream(w, 'swe-2-max')
+        out = ccproxy.ResponsesStream(w, 'swe-2-max')
         out.arm()
         time.sleep(3.5)
         out.release()
@@ -306,9 +306,9 @@ class ResponsesKeepaliveTests(unittest.TestCase):
         self.assertEqual(len(w.buf), before, 'written after release')
 
     def test_disabled_with_the_anthropic_one(self):
-        with mock.patch.object(devinx, 'KEEPALIVE_EVERY', 0):
+        with mock.patch.object(ccproxy, 'KEEPALIVE_EVERY', 0):
             w = Wire()
-            out = devinx.ResponsesStream(w, 'swe-2-max')
+            out = ccproxy.ResponsesStream(w, 'swe-2-max')
             out.arm()
             time.sleep(1.5)
             out.release()
@@ -318,7 +318,7 @@ class ResponsesKeepaliveTests(unittest.TestCase):
         class Broken(Wire):
             def write(self, b):
                 raise BrokenPipeError()
-        for emitter in (devinx.AnthropicStream, devinx.ResponsesStream):
+        for emitter in (ccproxy.AnthropicStream, ccproxy.ResponsesStream):
             with self.subTest(emitter=emitter.__name__):
                 out = emitter(Broken(), 'swe-2-max')
                 out.arm()
@@ -326,20 +326,20 @@ class ResponsesKeepaliveTests(unittest.TestCase):
                 out.release()
 
     def _turn(self, attempts, arm_now=True):
-        class Early(devinx.ResponsesStream):
+        class Early(ccproxy.ResponsesStream):
             def arm(self):
                 self.start()
         buf = io.BytesIO()
         body = {'model': 'swe-2-max', 'stream': True, 'messages': []}
         with isolated_accounts(fake_accounts('a')), \
-             mock.patch.object(devinx, 'compact_body', side_effect=lambda b: b), \
-             mock.patch.object(devinx, 'build_request', return_value=(
+             mock.patch.object(ccproxy, 'compact_body', side_effect=lambda b: b), \
+             mock.patch.object(ccproxy, 'build_request', return_value=(
                  SimpleNamespace(cascade_id='test'), 'swe-2-max')), \
-             mock.patch.object(devinx, 'paced', return_value=contextlib.nullcontext()), \
-             mock.patch.object(devinx, 'chat_stream', side_effect=attempts), \
-             mock.patch.object(devinx.time, 'sleep'), \
+             mock.patch.object(ccproxy, 'paced', return_value=contextlib.nullcontext()), \
+             mock.patch.object(ccproxy, 'chat_stream', side_effect=attempts), \
+             mock.patch.object(ccproxy.time, 'sleep'), \
              contextlib.redirect_stdout(io.StringIO()):
-            result = devinx.run_swe(body, buf, Early if arm_now else devinx.ResponsesStream)
+            result = ccproxy.run_swe(body, buf, Early if arm_now else ccproxy.ResponsesStream)
         return result, buf.getvalue()
 
     def test_a_retry_after_the_keepalive_committed_reuses_the_stream(self):
@@ -381,17 +381,17 @@ class SharedDeadlineTests(unittest.TestCase):
         body = {'model': 'swe-2-max', 'stream': False, 'messages': messages,
                 'metadata': {'user_id': 'shared-deadline'}}
         with isolated_accounts(fake_accounts('a')), \
-             mock.patch.object(devinx, 'RATE_WAIT_BUDGET', 30), \
-             mock.patch.object(devinx, 'RATE_FLOOR', 3.0), \
-             mock.patch.object(devinx, 'COMPACT_AT', 400), \
-             mock.patch.object(devinx, '_summaries', {}), \
-             mock.patch.object(devinx, 'build_request', return_value=(
+             mock.patch.object(ccproxy, 'RATE_WAIT_BUDGET', 30), \
+             mock.patch.object(ccproxy, 'RATE_FLOOR', 3.0), \
+             mock.patch.object(ccproxy, 'COMPACT_AT', 400), \
+             mock.patch.object(ccproxy, '_summaries', {}), \
+             mock.patch.object(ccproxy, 'build_request', return_value=(
                  SimpleNamespace(cascade_id='test'), 'swe-2-max')), \
-             mock.patch.object(devinx, 'paced', return_value=contextlib.nullcontext()), \
-             mock.patch.object(devinx, 'chat_stream', chat), \
-             mock.patch.object(devinx.time, 'sleep', sleeps), \
+             mock.patch.object(ccproxy, 'paced', return_value=contextlib.nullcontext()), \
+             mock.patch.object(ccproxy, 'chat_stream', chat), \
+             mock.patch.object(ccproxy.time, 'sleep', sleeps), \
              contextlib.redirect_stdout(io.StringIO()):
-            _, err = devinx.run_swe(body, None)
+            _, err = ccproxy.run_swe(body, None)
         self.assertIn('resource_exhausted', err)
         self.assertIn('summary', calls)
         # One budget, plus at most one jittered wait that started inside it.
@@ -417,11 +417,11 @@ class ClientGoneTests(unittest.TestCase):
         for name, value in {'RATE_FLOOR': 0.2, 'RATE_WAIT_BUDGET': 120,
                             'KEEPALIVE_EVERY': 1, 'chat_stream': chat,
                             '_summaries': {}}.items():
-            self.stack.enter_context(mock.patch.object(devinx, name, value))
-        self.stack.enter_context(mock.patch.object(devinx, 'build_request', return_value=(
+            self.stack.enter_context(mock.patch.object(ccproxy, name, value))
+        self.stack.enter_context(mock.patch.object(ccproxy, 'build_request', return_value=(
             SimpleNamespace(cascade_id='test'), 'swe-2-max')))
         self.stack.enter_context(mock.patch.object(
-            devinx, 'paced', return_value=contextlib.nullcontext()))
+            ccproxy, 'paced', return_value=contextlib.nullcontext()))
         self.log = io.StringIO()
         self.stack.enter_context(contextlib.redirect_stdout(self.log))
         self.live = LiveServer()
@@ -454,13 +454,13 @@ class ClientGoneTests(unittest.TestCase):
     def test_messages_stream_and_non_stream(self):
         for stream in (True, False):
             with self.subTest(stream=stream):
-                with mock.patch.object(devinx, 'compact_body', side_effect=lambda b: b):
+                with mock.patch.object(ccproxy, 'compact_body', side_effect=lambda b: b):
                     self.hang_up('/v1/messages', {
                         'model': 'swe-2-max', 'stream': stream, 'max_tokens': 16,
                         'messages': [{'role': 'user', 'content': 'hi'}]})
 
     def test_responses_route(self):
-        with mock.patch.object(devinx, 'compact_body', side_effect=lambda b: b):
+        with mock.patch.object(ccproxy, 'compact_body', side_effect=lambda b: b):
             self.hang_up('/v1/responses', {
                 'model': 'swe-2-max', 'stream': True,
                 'input': [{'type': 'message', 'role': 'user', 'content': 'hi'}]})
@@ -470,7 +470,7 @@ class ClientGoneTests(unittest.TestCase):
         for i in range(12):
             messages.append({'role': 'assistant' if i % 2 == 0 else 'user',
                              'content': f'turn {i} ' + 'y' * 400})
-        with mock.patch.object(devinx, 'COMPACT_AT', 400):
+        with mock.patch.object(ccproxy, 'COMPACT_AT', 400):
             self.hang_up('/v1/messages', {
                 'model': 'swe-2-max', 'stream': True, 'max_tokens': 16,
                 'metadata': {'user_id': 'gone-in-summary'}, 'messages': messages})
@@ -499,14 +499,14 @@ class SweCapacityTests(unittest.TestCase):
                             'KEEPALIVE_EVERY': 0, 'chat_stream': chat,
                             '_inflight': {'n': 0, 'swe': 0},
                             '_active_requests': {}}.items():
-            self.stack.enter_context(mock.patch.object(devinx, name, value))
-        self.stack.enter_context(mock.patch.object(devinx, 'compact_body', side_effect=lambda b: b))
-        self.stack.enter_context(mock.patch.object(devinx, 'build_request', return_value=(
+            self.stack.enter_context(mock.patch.object(ccproxy, name, value))
+        self.stack.enter_context(mock.patch.object(ccproxy, 'compact_body', side_effect=lambda b: b))
+        self.stack.enter_context(mock.patch.object(ccproxy, 'build_request', return_value=(
             SimpleNamespace(cascade_id='test'), 'swe-2-max')))
         self.stack.enter_context(mock.patch.object(
-            devinx, 'paced', return_value=contextlib.nullcontext()))
+            ccproxy, 'paced', return_value=contextlib.nullcontext()))
         self.relay = self.stack.enter_context(
-            mock.patch.object(devinx.SESSION, 'request', return_value=relayed))
+            mock.patch.object(ccproxy.SESSION, 'request', return_value=relayed))
         self.stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
         self.live = LiveServer()
         self.stack.callback(self.live.close)
@@ -545,36 +545,36 @@ class SweCapacityTests(unittest.TestCase):
         # The last reply can reach the client a moment before its handler
         # gives its slot back.
         deadline = time.time() + 2
-        while devinx._inflight['n'] > 2 and time.time() < deadline:
+        while ccproxy._inflight['n'] > 2 and time.time() < deadline:
             time.sleep(0.02)
-        with devinx._inflight_lock:
-            self.assertEqual(devinx._inflight, {'n': 2, 'swe': 2},
+        with ccproxy._inflight_lock:
+            self.assertEqual(ccproxy._inflight, {'n': 2, 'swe': 2},
                              'a drain would not see the held turns')
         self.release.set()
         for t in held:
             t.join(5)
         self.assertEqual([s for s, _ in results], [200, 200])
         deadline = time.time() + 2
-        while devinx._inflight['n'] and time.time() < deadline:
+        while ccproxy._inflight['n'] and time.time() < deadline:
             time.sleep(0.02)
-        self.assertEqual(devinx._inflight, {'n': 0, 'swe': 0})
+        self.assertEqual(ccproxy._inflight, {'n': 0, 'swe': 0})
 
     def test_the_general_cap_still_bounds_everything_else(self):
-        with mock.patch.object(devinx, '_request_local', threading.local()):
-            self.assertTrue(devinx._enter_request())
-            self.assertTrue(devinx._enter_swe())
-            first = devinx._request_local.key
-            devinx._request_local.key = None
-            self.assertTrue(devinx._enter_request())
-            self.assertTrue(devinx._enter_request())
-            self.assertFalse(devinx._enter_request(), 'general cap not applied')
-            devinx._request_local.key = first
-            devinx._leave_request()
-        self.assertEqual(devinx._inflight['swe'], 0)
+        with mock.patch.object(ccproxy, '_request_local', threading.local()):
+            self.assertTrue(ccproxy._enter_request())
+            self.assertTrue(ccproxy._enter_swe())
+            first = ccproxy._request_local.key
+            ccproxy._request_local.key = None
+            self.assertTrue(ccproxy._enter_request())
+            self.assertTrue(ccproxy._enter_request())
+            self.assertFalse(ccproxy._enter_request(), 'general cap not applied')
+            ccproxy._request_local.key = first
+            ccproxy._leave_request()
+        self.assertEqual(ccproxy._inflight['swe'], 0)
 
 
 class CredentialFiles:
-    """Temporary credentials.toml files, the only ones devinx gets to see."""
+    """Temporary credentials.toml files, the only ones ccproxy gets to see."""
 
     def __init__(self, test):
         import tempfile
@@ -583,10 +583,10 @@ class CredentialFiles:
         self.root = Path(tmp.name)
         self.paths = []
         env = {k: v for k, v in os.environ.items()
-               if k not in ('DEVINX_API_KEYS', 'DEVINX_API_KEY')}
-        for patcher in (mock.patch.object(devinx, '_accounts', []),
-                        mock.patch.object(devinx, '_jwt_locks', {}),
-                        mock.patch.object(devinx, '_credential_files',
+               if k not in ('CCPROXY_API_KEYS', 'CCPROXY_API_KEY')}
+        for patcher in (mock.patch.object(ccproxy, '_accounts', []),
+                        mock.patch.object(ccproxy, '_jwt_locks', {}),
+                        mock.patch.object(ccproxy, '_credential_files',
                                           lambda: [str(p) for p in self.paths]),
                         mock.patch.dict(os.environ, env, clear=True)):
             patcher.start()
@@ -619,28 +619,28 @@ class ReadKeyTests(unittest.TestCase):
     ]
 
     def test_every_quoting_style_with_and_without_a_toml_parser(self):
-        for parser in (devinx.tomllib, None):
+        for parser in (ccproxy.tomllib, None):
             for text, expected in self.CASES:
                 with self.subTest(parser=bool(parser), text=text), \
-                     mock.patch.object(devinx, 'tomllib', parser):
+                     mock.patch.object(ccproxy, 'tomllib', parser):
                     path = self.files.write('case', text)
-                    self.assertEqual(devinx._read_key(str(path)), expected)
+                    self.assertEqual(ccproxy._read_key(str(path)), expected)
 
     def test_unreadable_files_give_none(self):
         path = self.files.write('empty', 'nothing = "here"\n')
-        self.assertIsNone(devinx._read_key(str(path)))
+        self.assertIsNone(ccproxy._read_key(str(path)))
         (self.files.root / 'bin').write_bytes(b'\xff\xfe\x00windsurf')
-        self.assertIsNone(devinx._read_key(str(self.files.root / 'bin')))
-        self.assertIsNone(devinx._read_key(str(self.files.root / 'missing')))
+        self.assertIsNone(ccproxy._read_key(str(self.files.root / 'bin')))
+        self.assertIsNone(ccproxy._read_key(str(self.files.root / 'missing')))
 
     def test_one_bad_file_does_not_break_the_others(self):
         self.files.write('bad', 'windsurf_api_key = \n[[[\n')
         self.files.write('good', "windsurf_api_key = 'good-key'\n")
-        loaded = devinx._load_accounts()
+        loaded = ccproxy._load_accounts()
         self.assertEqual([a['name'] for a in loaded], ['good'])
-        self.assertEqual(loaded[0]['key'], devinx.SESSION_PREFIX + 'good-key')
-        with mock.patch.object(devinx, '_read_key', side_effect=[IndexError('x'), 'k2']):
-            self.assertEqual(len(devinx._load_accounts()), 1)
+        self.assertEqual(loaded[0]['key'], ccproxy.SESSION_PREFIX + 'good-key')
+        with mock.patch.object(ccproxy, '_read_key', side_effect=[IndexError('x'), 'k2']):
+            self.assertEqual(len(ccproxy._load_accounts()), 1)
 
 
 class ReloadTests(unittest.TestCase):
@@ -655,35 +655,35 @@ class ReloadTests(unittest.TestCase):
         self.stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
 
     def test_reset_key_keeps_every_accounts_state_and_updates_in_place(self):
-        a, b = devinx.accounts()
+        a, b = ccproxy.accounts()
         now = time.time()
-        devinx.block_account(b, 600)
+        ccproxy.block_account(b, 600)
         b_block, b_refused = b['blocked_until'], b['refused_at']
         a['pace'] = 'sentinel'
         a['jwt'], a['exp'] = 'stale.jwt', now + 3600
         self.a.write_text('windsurf_api_key = "new-a"\n')
-        devinx.reset_key()
-        a2, b2 = devinx.accounts()
+        ccproxy.reset_key()
+        a2, b2 = ccproxy.accounts()
         self.assertIs(a2, a, 'the caller holding the dict would retry stale')
-        self.assertEqual(a['key'], devinx.SESSION_PREFIX + 'new-a')
+        self.assertEqual(a['key'], ccproxy.SESSION_PREFIX + 'new-a')
         self.assertIsNone(a['jwt'], 'a JWT for the old key was kept')
         self.assertEqual(a['pace'], 'sentinel')
         self.assertIs(b2, b)
         self.assertEqual((b['blocked_until'], b['refused_at']), (b_block, b_refused))
-        self.assertIsNone(devinx.claim_account(avoid=a)[0], 'b was unblocked')
+        self.assertIsNone(ccproxy.claim_account(avoid=a)[0], 'b was unblocked')
 
     def test_a_reload_that_finds_nothing_keeps_the_current_accounts(self):
-        before = devinx.accounts()
+        before = ccproxy.accounts()
         for p in list(self.files.paths):
             p.unlink()
-        devinx.reset_key()
-        self.assertEqual(devinx.accounts(), before)
+        ccproxy.reset_key()
+        self.assertEqual(ccproxy.accounts(), before)
 
     def _auth_response(self, status, jwt=None):
         import requests
         r = mock.Mock(status_code=status)
         if status == 200:
-            r.content = devinx.protos()['GetUserJwtResponse'](
+            r.content = ccproxy.protos()['GetUserJwtResponse'](
                 user_jwt=jwt).SerializeToString()
             r.raise_for_status.return_value = None
         else:
@@ -692,7 +692,7 @@ class ReloadTests(unittest.TestCase):
         return r
 
     def _sent_key(self, call):
-        req = devinx.protos()['GetUserJwtRequest']()
+        req = ccproxy.protos()['GetUserJwtRequest']()
         req.ParseFromString(call.kwargs['data'])
         return req.metadata.api_key
 
@@ -702,54 +702,54 @@ class ReloadTests(unittest.TestCase):
                                SerializeToString=lambda: b'test')
 
     def test_a_refused_jwt_reloads_and_retries_with_the_new_key(self):
-        a, _ = devinx.accounts()
+        a, _ = ccproxy.accounts()
         self.a.write_text("windsurf_api_key = 'new-a'\n")
         chat = mock.Mock(status_code=500, text='stop here')
         responses = [self._auth_response(401), self._auth_response(200, 'x.eyJ9.y'), chat]
-        with mock.patch.object(devinx.SESSION, 'post', side_effect=responses) as post:
-            out = list(devinx.chat_stream(self._req(), a))
+        with mock.patch.object(ccproxy.SESSION, 'post', side_effect=responses) as post:
+            out = list(ccproxy.chat_stream(self._req(), a))
         self.assertEqual(out, [(None, 'upstream 500: stop here')])
-        auth = [c for c in post.call_args_list if c.args[0].endswith(devinx.AUTH_PATH)]
+        auth = [c for c in post.call_args_list if c.args[0].endswith(ccproxy.AUTH_PATH)]
         self.assertEqual([self._sent_key(c) for c in auth],
-                         [devinx.SESSION_PREFIX + 'old-a', devinx.SESSION_PREFIX + 'new-a'])
+                         [ccproxy.SESSION_PREFIX + 'old-a', ccproxy.SESSION_PREFIX + 'new-a'])
 
     def test_a_persistent_jwt_refusal_is_an_authentication_error(self):
-        a, _ = devinx.accounts()
-        with mock.patch.object(devinx.SESSION, 'post', side_effect=[
+        a, _ = ccproxy.accounts()
+        with mock.patch.object(ccproxy.SESSION, 'post', side_effect=[
                 self._auth_response(401), self._auth_response(403)]) as post:
-            out = list(devinx.chat_stream(self._req(), a))
+            out = list(ccproxy.chat_stream(self._req(), a))
         self.assertEqual(post.call_count, 2, 'the chat endpoint was called anyway')
         (msg, err), = out
         self.assertIsNone(msg)
-        self.assertEqual(devinx.anthropic_error(err)[:2], ('authentication_error', 401))
+        self.assertEqual(ccproxy.anthropic_error(err)[:2], ('authentication_error', 401))
 
     def test_a_persistent_chat_refusal_is_an_authentication_error(self):
-        a, _ = devinx.accounts()
+        a, _ = ccproxy.accounts()
         refused = mock.Mock(status_code=401, text='expired')
-        with mock.patch.object(devinx, 'get_jwt', return_value=('jwt', None)), \
-             mock.patch.object(devinx.SESSION, 'post', side_effect=[refused, refused]):
-            (_, err), = list(devinx.chat_stream(self._req(), a))
-        self.assertEqual(devinx.anthropic_error(err)[:2], ('authentication_error', 401))
+        with mock.patch.object(ccproxy, 'get_jwt', return_value=('jwt', None)), \
+             mock.patch.object(ccproxy.SESSION, 'post', side_effect=[refused, refused]):
+            (_, err), = list(ccproxy.chat_stream(self._req(), a))
+        self.assertEqual(ccproxy.anthropic_error(err)[:2], ('authentication_error', 401))
 
     def test_a_slow_auth_call_for_one_account_does_not_hold_another(self):
-        a, b = devinx.accounts()
+        a, b = ccproxy.accounts()
         gate, entered = threading.Event(), threading.Event()
         fast = self._auth_response(200, 'x.eyJ9.y')
 
         def post(url, data=None, **kwargs):
-            req = devinx.protos()['GetUserJwtRequest']()
+            req = ccproxy.protos()['GetUserJwtRequest']()
             req.ParseFromString(data)
             if req.metadata.api_key == a['key']:
                 entered.set()
                 gate.wait(5)
             return fast
 
-        with mock.patch.object(devinx.SESSION, 'post', side_effect=post):
-            slow = threading.Thread(target=devinx.get_jwt, args=(a,))
+        with mock.patch.object(ccproxy.SESSION, 'post', side_effect=post):
+            slow = threading.Thread(target=ccproxy.get_jwt, args=(a,))
             slow.start()
             self.assertTrue(entered.wait(3))
             t0 = time.time()
-            self.assertEqual(devinx.get_jwt(b)[0], 'x.eyJ9.y')
+            self.assertEqual(ccproxy.get_jwt(b)[0], 'x.eyJ9.y')
             self.assertLess(time.time() - t0, 1, 'b waited behind a')
             gate.set()
             slow.join(5)
@@ -765,9 +765,9 @@ class DocumentBlockTests(unittest.TestCase):
 
     def build(self, messages):
         log = io.StringIO()
-        with mock.patch.object(devinx, 'api_key', return_value='test-only'), \
+        with mock.patch.object(ccproxy, 'api_key', return_value='test-only'), \
              contextlib.redirect_stdout(log):
-            req, _ = devinx.build_request({'model': 'swe-2-max', 'messages': messages})
+            req, _ = ccproxy.build_request({'model': 'swe-2-max', 'messages': messages})
         return req, log.getvalue()
 
     def test_documents_inside_a_tool_result(self):
@@ -795,12 +795,12 @@ class DocumentBlockTests(unittest.TestCase):
     def test_text_only_results_are_unchanged(self):
         block = {'type': 'tool_result', 'tool_use_id': 't',
                  'content': [{'type': 'text', 'text': 'a'}, {'type': 'text', 'text': 'b'}]}
-        self.assertEqual(devinx._tool_result_text(block), 'ab')
+        self.assertEqual(ccproxy._tool_result_text(block), 'ab')
 
     def test_a_text_document_counts_toward_the_estimate(self):
         body = {'messages': [{'role': 'user', 'content': [
             {'type': 'document', 'source': {'type': 'text', 'data': 'x' * 40000}}]}]}
-        self.assertGreater(devinx.estimate_tokens(body), 9000)
+        self.assertGreater(ccproxy.estimate_tokens(body), 9000)
 
 
 class SharedKeySummaryTests(unittest.TestCase):
@@ -824,21 +824,21 @@ class SharedKeySummaryTests(unittest.TestCase):
             calls.append(previous)
             return f'summary {len(calls)}'
 
-        self.assertEqual(devinx._conv_key(self.run_body('A', 10)),
-                         devinx._conv_key(self.run_body('B', 10)))
+        self.assertEqual(ccproxy._conv_key(self.run_body('A', 10)),
+                         ccproxy._conv_key(self.run_body('B', 10)))
         log = io.StringIO()
-        with mock.patch.object(devinx, '_summaries', {}), \
-             mock.patch.object(devinx, '_summary_flights', {}), \
-             mock.patch.object(devinx, 'COMPACT_AT', 1200), \
-             mock.patch.object(devinx, 'COMPACT_STRICT', False), \
-             mock.patch.object(devinx, 'summarise_turns', side_effect=summarise), \
+        with mock.patch.object(ccproxy, '_summaries', {}), \
+             mock.patch.object(ccproxy, '_summary_flights', {}), \
+             mock.patch.object(ccproxy, 'COMPACT_AT', 1200), \
+             mock.patch.object(ccproxy, 'COMPACT_STRICT', False), \
+             mock.patch.object(ccproxy, 'summarise_turns', side_effect=summarise), \
              contextlib.redirect_stdout(log):
-            devinx.compact_body(self.run_body('A', 10))
-            devinx.compact_body(self.run_body('B', 10))
+            ccproxy.compact_body(self.run_body('A', 10))
+            ccproxy.compact_body(self.run_body('B', 10))
             first_round = len(calls)
             for turns in (14, 18):
                 for tag in ('A', 'B'):
-                    out = devinx.compact_body(self.run_body(tag, turns))
+                    out = ccproxy.compact_body(self.run_body(tag, turns))
                     other = 'B' if tag == 'A' else 'A'
                     self.assertNotIn(f'{other} step', json.dumps(out['messages'][1]))
         self.assertEqual(first_round, 2)
@@ -849,9 +849,9 @@ class SharedKeySummaryTests(unittest.TestCase):
         self.assertEqual(log.getvalue().count('none of the'), 1)
 
     def test_cascade_id_stays_stable_for_one_agent(self):
-        with mock.patch.object(devinx, 'api_key', return_value='test-only'):
-            a = devinx.build_request(self.run_body('A', 3))[0].cascade_id
-            b = devinx.build_request(self.run_body('A', 9))[0].cascade_id
+        with mock.patch.object(ccproxy, 'api_key', return_value='test-only'):
+            a = ccproxy.build_request(self.run_body('A', 3))[0].cascade_id
+            b = ccproxy.build_request(self.run_body('A', 9))[0].cascade_id
         self.assertEqual(a, b)
 
 
@@ -874,13 +874,13 @@ class CompactionCostTests(unittest.TestCase):
                     'type': 'text', 'data': 'D' * 4321}}, 'bare string']}]}
 
     def test_the_memoized_estimate_is_the_same_figure(self):
-        plain = devinx.estimate_tokens(self.BODY)
+        plain = ccproxy.estimate_tokens(self.BODY)
         memo = {}
-        self.assertEqual(devinx.estimate_tokens(self.BODY, memo), plain)
-        self.assertEqual(devinx.estimate_tokens(self.BODY, memo), plain)
+        self.assertEqual(ccproxy.estimate_tokens(self.BODY, memo), plain)
+        self.assertEqual(ccproxy.estimate_tokens(self.BODY, memo), plain)
         trial = dict(self.BODY, messages=self.BODY['messages'][:2] + [
             {'role': 'user', 'content': 'new ' * 30}])
-        self.assertEqual(devinx.estimate_tokens(trial, memo), devinx.estimate_tokens(trial))
+        self.assertEqual(ccproxy.estimate_tokens(trial, memo), ccproxy.estimate_tokens(trial))
 
     def test_each_message_is_weighed_once_per_compaction(self):
         messages = [{'role': 'user', 'content': 'task'}] + [
@@ -888,22 +888,22 @@ class CompactionCostTests(unittest.TestCase):
             for i in range(20)]
         body = {'model': 'swe-2-max', 'messages': messages,
                 'metadata': {'user_id': 'memo'}}
-        real, seen = devinx._message_weight, []
+        real, seen = ccproxy._message_weight, []
 
         def counting(m):
             seen.append(id(m))
             return real(m)
-        with mock.patch.object(devinx, '_message_weight', counting), \
-             mock.patch.object(devinx, '_summaries', {}), \
-             mock.patch.object(devinx, 'COMPACT_AT', 1500), \
-             mock.patch.object(devinx, 'summarise_turns', return_value='S'), \
+        with mock.patch.object(ccproxy, '_message_weight', counting), \
+             mock.patch.object(ccproxy, '_summaries', {}), \
+             mock.patch.object(ccproxy, 'COMPACT_AT', 1500), \
+             mock.patch.object(ccproxy, 'summarise_turns', return_value='S'), \
              contextlib.redirect_stdout(io.StringIO()):
-            devinx.compact_body(body)
+            ccproxy.compact_body(body)
         for m in messages:
             self.assertLessEqual(seen.count(id(m)), 1)
 
     def test_the_summary_request_leaves_the_agent_prompt_out(self):
-        body = devinx._summary_body([{'role': 'user', 'content': 'x'}], 'swe-2-max',
+        body = ccproxy._summary_body([{'role': 'user', 'content': 'x'}], 'swe-2-max',
                                     'SECRET-AGENT-PROMPT', None)
         self.assertNotIn('SECRET-AGENT-PROMPT', json.dumps(body))
         self.assertIn('<conversation>', json.dumps(body))
@@ -917,7 +917,7 @@ class BuildIdTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
-        for name in ('devinx.py', 'runtime_support.py', 'diagnostics.py',
+        for name in ('ccproxy.py', 'runtime_support.py', 'diagnostics.py',
                      'tools/log_stats.py', 'tools/dashboard.html', 'descriptors/a.fdp'):
             target = self.root / name
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -951,22 +951,22 @@ class PeerOpenTests(unittest.TestCase):
         import socket
         a, b = socket.socketpair()
         self.addCleanup(a.close)
-        self.assertTrue(devinx._peer_open(a))
+        self.assertTrue(ccproxy._peer_open(a))
         b.sendall(b'pipelined')
-        self.assertTrue(devinx._peer_open(a), 'pending data read as gone')
+        self.assertTrue(ccproxy._peer_open(a), 'pending data read as gone')
         self.assertEqual(a.recv(64), b'pipelined', 'the peek consumed data')
-        with mock.patch.object(devinx.select, 'poll', side_effect=ValueError('fd')), \
-             mock.patch.object(devinx.select, 'select', side_effect=ValueError('fd')):
-            self.assertTrue(devinx._peer_open(a))
+        with mock.patch.object(ccproxy.select, 'poll', side_effect=ValueError('fd')), \
+             mock.patch.object(ccproxy.select, 'select', side_effect=ValueError('fd')):
+            self.assertTrue(ccproxy._peer_open(a))
         b.close()
-        self.assertFalse(devinx._peer_open(a))
+        self.assertFalse(ccproxy._peer_open(a))
 
     def test_hold_lines_still_read_by_the_log_extractor(self):
         from tools import log_stats
         line = 'upstream rate limited on every credential, holding the turn for 4s (12s waited so far)'
         self.assertEqual(log_stats.RE_HOLD.search(line).group(1), '4')
         self.assertEqual(log_stats.RE_HELD_SO_FAR.search(line).group(1), '12')
-        src = (ROOT / 'devinx.py').read_text(encoding='utf-8')
+        src = (ROOT / 'ccproxy.py').read_text(encoding='utf-8')
         self.assertEqual(src.count('waited so far)"'), 2)
 
 

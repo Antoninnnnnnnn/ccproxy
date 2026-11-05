@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Launch Claude Code, optionally through the local devinx service.
+"""Launch Claude Code, optionally through the local ccproxy service.
 
 Without --devin (or --d) this is a passthrough: plain claude, no service started,
-no environment injected, no extra flags. With it, devinx.py is started if its
+no environment injected, no extra flags. With it, ccproxy.py is started if its
 port is not already answering, and claude is pointed at it.
 
 Keeping this in Python rather than in a .sh and a .cmd means one implementation
@@ -22,30 +22,31 @@ import subprocess
 import sys
 import time
 import urllib.request
+import runtime_support
 from runtime_support import build_id, hello_proof, service_secret, startup_lock, swe_enabled
 import kimi
 
 def _port_env(name, default):
-    """A bad DEVINX_PORT must not crash the launcher before main() ever runs
+    """A bad CCPROXY_PORT must not crash the launcher before main() ever runs
     (this line executes at import time): fall back to the default and say so,
-    the same clear-error spirit as _validate_devinx_env() below."""
+    the same clear-error spirit as _validate_ccproxy_env() below."""
     raw = os.environ.get(name)
     if raw is None:
         return default
     try:
         return int(raw)
     except ValueError:
-        sys.stderr.write(f"devinx: {name}={raw!r} is not a valid integer; "
+        sys.stderr.write(f"ccproxy: {name}={raw!r} is not a valid integer; "
                          f"using {default}\n")
         return default
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PORT = _port_env("DEVINX_PORT", 8316)
+PORT = _port_env("CCPROXY_PORT", 8316)
 HOST = "127.0.0.1"
 START_TIMEOUT = 40
-# Must match devinx.SWE_ALIAS: the id the service advertises and the launcher
-# selects, and the one the readiness probe identifies devinx by.
+# Must match ccproxy.SWE_ALIAS: the id the service advertises and the launcher
+# selects, and the one the readiness probe identifies ccproxy by.
 SWE_ALIAS = "swe-2"
 
 # Cleared so Claude Code falls back to its own claude.ai login. A leftover API key
@@ -53,7 +54,7 @@ SWE_ALIAS = "swe-2"
 # Also cleared: anything that redirects the client to a different backend
 # entirely (Bedrock, Vertex, a custom header set) — devin mode routes claude-*
 # straight to api.anthropic.com, and a lingering provider override would take
-# the model there instead, silently, with no relation to devinx at all.
+# the model there instead, silently, with no relation to ccproxy at all.
 SCRUB = (
     "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL",
     "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
@@ -64,7 +65,7 @@ SCRUB = (
     "CLOUD_ML_REGION",
 )
 
-# NO_PROXY additions for the client we launch: it talks to devinx over loopback
+# NO_PROXY additions for the client we launch: it talks to ccproxy over loopback
 # and a shell-level HTTP(S)_PROXY must not swallow that traffic. Appended, never
 # set outright, so a proxy that legitimately excludes other hosts keeps doing so.
 NO_PROXY_HOSTS = ("127.0.0.1", "localhost")
@@ -82,7 +83,7 @@ ENV = {
     "ANTHROPIC_BASE_URL": f"http://{HOST}:{PORT}",
     # The alias, not a tier: this is the entry shown in /model, and the effort
     # slider next to it is what selects medium / high / max. Only while Devin
-    # access is on (DEVINX_SWE=1): off, /model lists no model the service would
+    # access is on (CCPROXY_SWE=1): off, /model lists no model the service would
     # refuse.
     **({"ANTHROPIC_CUSTOM_MODEL_OPTION": SWE_ALIAS,
         "ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES":
@@ -104,14 +105,14 @@ ENV = {
     # runtime.max_input_tokens on the /v1/models entries looks like the right
     # answer and is not: measured against 2.1.272, the unrecognised-model notice
     # still reports the 200k it assumes, so gateway discovery does not size the
-    # model from the catalog. Override with DEVINX_CONTEXT_TOKENS.
+    # model from the catalog. Override with CCPROXY_CONTEXT_TOKENS.
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS": os.environ.get(
-        "DEVINX_CONTEXT_TOKENS", str(256 * 1024)),
+        "CCPROXY_CONTEXT_TOKENS", str(256 * 1024)),
     # And the window must not be enforced locally, because for a subagent that
     # enforcement is fatal rather than corrective. Measured against 2.1.272 with
     # a window declared at 20k and a task needing more: the subagent dies with
     # "Agent terminated early due to an API error: Prompt is too long (error
-    # type invalid_request)" and devinx never receives a single request — the
+    # type invalid_request)" and ccproxy never receives a single request — the
     # client refuses on its own estimate, without compacting and without asking.
     # With this set, the same subagent runs to completion, turns of 37k and 58k
     # reaching the upstream that was always willing to take them.
@@ -120,9 +121,9 @@ ENV = {
     # the overflow message reports as the maximum. What changes is who decides.
     # A turn that genuinely exceeds what SWE-2 accepts now gets refused by the
     # upstream, and that refusal the client does recover from — measured, it
-    # compacts and finishes the task. Set DEVINX_ENFORCE_WINDOW=1 to put the
+    # compacts and finishes the task. Set CCPROXY_ENFORCE_WINDOW=1 to put the
     # local cap back.
-    **({} if os.environ.get("DEVINX_ENFORCE_WINDOW") == "1" else
+    **({} if os.environ.get("CCPROXY_ENFORCE_WINDOW") == "1" else
        {"CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT": "1"}),
 }
 
@@ -137,10 +138,10 @@ DEVIN_FLAGS = {"--devin", "--d"}
 ORCH_FLAGS = {"--or"}
 
 # Which client to launch. Codex reaches the same service on the same port; only
-# the wire differs, and devinx routes on the model name either way.
+# the wire differs, and ccproxy routes on the model name either way.
 CODEX_FLAGS = {"--codex", "--cx"}
 
-# One-run opt-out when DEVINX_ALWAYS=1 has made devin mode the default. It only
+# One-run opt-out when CCPROXY_ALWAYS=1 has made devin mode the default. It only
 # cancels that default: an explicit --devin/--or/--codex on the same command
 # line still wins, so `--plain` composes with a script that always adds its own
 # flag rather than silently defeating it.
@@ -170,10 +171,10 @@ def split_args(argv):
     Everything after a bare `--` is passed through untouched, so a prompt that
     happens to contain a flag is never swallowed.
     """
-    use_orch = os.environ.get("DEVINX_ORCHESTRATOR") == "1"
-    # DEVINX_ORCHESTRATOR=1 alone must behave like --or, which implies --devin
+    use_orch = os.environ.get("CCPROXY_ORCHESTRATOR") == "1"
+    # CCPROXY_ORCHESTRATOR=1 alone must behave like --or, which implies --devin
     # too: the skill delegates to agents that exist only in devin mode.
-    use_devin = os.environ.get("DEVINX_ALWAYS") == "1" or use_orch
+    use_devin = os.environ.get("CCPROXY_ALWAYS") == "1" or use_orch
     use_codex = False
     plain = False
     explicit = False
@@ -204,9 +205,9 @@ def split_args(argv):
             continue
         out.append(a)
     if plain and not explicit:
-        # Cancel the orchestrator default too: DEVINX_ORCHESTRATOR=1 turning
+        # Cancel the orchestrator default too: CCPROXY_ORCHESTRATOR=1 turning
         # use_orch on above is exactly the same kind of ambient default
-        # DEVINX_ALWAYS is, and leaving it set here would report the
+        # CCPROXY_ALWAYS is, and leaving it set here would report the
         # orchestrator as enabled while the proxy it depends on is off.
         use_devin = False
         use_orch = False
@@ -217,7 +218,7 @@ AGENT_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 # GPT subagents, one per model and effort: the Agent tool takes no effort, so
 # choosing a subagent is the only place to choose it. Low is left out on
-# purpose (devinx also raises a low turn to medium on the gpt-* route).
+# purpose (ccproxy also raises a low turn to medium on the gpt-* route).
 GPT_AGENT_MODELS = (
     ("sol", "gpt-6.1-sol", "GPT-6.1 Sol",
      "the strongest GPT: hard implementation, debugging, a second opinion"),
@@ -237,7 +238,7 @@ def gpt_agents():
                 "description": (
                     f"{label} subagent at {effort} effort, on the user's ChatGPT "
                     f"subscription through the claude-code-proxy sidecar: {use}. "
-                    f"Long runs are compacted by devinx (GPT summarises GPT). "
+                    f"Long runs are compacted by ccproxy (GPT summarises GPT). "
                     f"Spends ChatGPT quota, not claude.ai or SWE-2."),
                 "prompt": (
                     f"You are a {label} coding subagent inside Claude Code. "
@@ -256,7 +257,7 @@ def gpt_agents():
 
 
 # Kimi subagents, one per model and effort, offered while a Kimi account is
-# saved (devinx --kimi-add). Kimi reasons at low, high and max.
+# saved (ccproxy --kimi-add). Kimi reasons at low, high and max.
 KIMI_AGENT_MODELS = (
     ("pro", "kimi-k3.1-pro", "Kimi K3.1 Pro",
      "the strongest Kimi: implementation, debugging, a second opinion beside "
@@ -276,8 +277,8 @@ def kimi_agents():
             out[f"kimi-{short}-{effort}"] = {
                 "description": (
                     f"{label} subagent at {effort} effort, on the user's Kimi "
-                    f"Code subscription through devinx: {use}. Long runs are "
-                    f"compacted by devinx (Kimi summarises Kimi). Spends Kimi "
+                    f"Code subscription through ccproxy: {use}. Long runs are "
+                    f"compacted by ccproxy (Kimi summarises Kimi). Spends Kimi "
                     f"quota, not claude.ai, ChatGPT or SWE-2."),
                 "prompt": (
                     f"You are a {label} coding subagent inside Claude Code. "
@@ -345,7 +346,7 @@ def packaged_agents():
             try:
                 agent["maxTurns"] = int(meta["maxTurns"])
             except ValueError:
-                sys.stderr.write(f"devinx: agent {name!r} has a non-numeric "
+                sys.stderr.write(f"ccproxy: agent {name!r} has a non-numeric "
                                  f"maxTurns ({meta['maxTurns']!r}); ignoring it\n")
         if meta.get("effort"):
             # Without it a subagent runs at the session's effort (measured: a
@@ -354,7 +355,7 @@ def packaged_agents():
             if meta["effort"] in AGENT_EFFORTS:
                 agent["effort"] = meta["effort"]
             else:
-                sys.stderr.write(f"devinx: agent {name!r} has an unknown effort "
+                sys.stderr.write(f"ccproxy: agent {name!r} has an unknown effort "
                                  f"({meta['effort']!r}); ignoring it\n")
         tools = [t.strip() for t in meta.get("tools", "").split(",") if t.strip()]
         if tools:
@@ -364,7 +365,7 @@ def packaged_agents():
         # closes the accidental path, not a determined one.
         blocked = [t.strip() for t in meta.get("disallowedTools", "").split(",")
                    if t.strip()]
-        if os.environ.get("DEVINX_SUBAGENT_MCP") != "1":
+        if os.environ.get("CCPROXY_SUBAGENT_MCP") != "1":
             # MCP tool schemas are re-sent in full on every request, and there
             # are usually a lot of them: measured here, a subagent turn goes from
             # ~240KB to ~49KB by excluding them, and a cold first turn from ~58s
@@ -377,7 +378,7 @@ def packaged_agents():
             agent["disallowedTools"] = blocked
         out[name] = agent
     for name, agent in {**gpt_agents(), **kimi_agents()}.items():
-        if os.environ.get("DEVINX_SUBAGENT_MCP") != "1":
+        if os.environ.get("CCPROXY_SUBAGENT_MCP") != "1":
             agent["disallowedTools"] = ["mcp__*"]
         # A file of the same name in agents/ wins: that is where an override goes.
         out.setdefault(name, agent)
@@ -411,7 +412,7 @@ GPT_PICKER = (
 GPT_BEHAVES_AS = "claude-opus-5-5"
 # Claude Code compacts a fixed 33k buffer short of this window (as /context
 # shows). Land that point on 90% of each model's window: 450k for Sol,
-# 244800 for Astra and Luna, matching devinx's subagent compaction.
+# 244800 for Astra and Luna, matching ccproxy's subagent compaction.
 GPT_AUTO_COMPACT_WINDOW = {
     "gpt-6.1-sol": 450000 + 33000,
     "gpt-6-astra": 244800 + 33000,
@@ -420,7 +421,7 @@ GPT_AUTO_COMPACT_WINDOW = {
 
 
 # The Kimi rows of /model, while a Kimi account is saved. Same mechanism as
-# GPT: behavesAs lends the effort slider (devinx maps it onto Kimi's low, high
+# GPT: behavesAs lends the effort slider (ccproxy maps it onto Kimi's low, high
 # and max) and each window is stated, since Opus's 1M is wrong for the 256k
 # models.
 KIMI_PICKER = (
@@ -434,7 +435,7 @@ KIMI_PICKER = (
 
 def kimi_auto_compact_window(model):
     # Claude Code compacts its fixed 33k buffer short of the window: land that
-    # on 90% of the model's window, where devinx compacts a subagent too.
+    # on 90% of the model's window, where ccproxy compacts a subagent too.
     return kimi.context_tokens(model) * 9 // 10 + 33000
 
 
@@ -442,7 +443,7 @@ def picker_settings(passthrough):
     """`--settings` carrying the GPT (and Kimi) picker rows, unless the user
     passed their own --settings: the client takes one, and theirs must win."""
     if any(a == "--settings" or a.startswith("--settings=") for a in passthrough):
-        sys.stderr.write("devinx: --settings was already given; the GPT and "
+        sys.stderr.write("ccproxy: --settings was already given; the GPT and "
                          "Kimi rows were not added to /model (type /model "
                          "gpt-6.1-sol)\n")
         return []
@@ -492,11 +493,11 @@ def merge_agents(passthrough, agents):
         try:
             existing = json.loads(raw)
         except ValueError:
-            sys.stderr.write("devinx: --agents is not valid JSON, "
+            sys.stderr.write("ccproxy: --agents is not valid JSON, "
                              "leaving it alone\n")
             return passthrough
         if not isinstance(existing, dict):
-            sys.stderr.write("devinx: --agents is valid JSON but not an "
+            sys.stderr.write("ccproxy: --agents is valid JSON but not an "
                              "object, so it cannot be merged; the swe2-* "
                              "agents will not be injected\n")
             return passthrough
@@ -542,18 +543,18 @@ def codex_args(orchestrate, add_profile=True):
     bargain the Claude side makes by injecting agents per session.
 
     add_profile=False keeps the roles and the default model but leaves out the
-    `-p devinx` selection: Codex refuses two `--profile`/-p flags outright, so
+    `-p ccproxy` selection: Codex refuses two `--profile`/-p flags outright, so
     when the user already passed their own, ours has to be skipped rather than
     handed to Codex twice.
     """
     args = [
-        "-c", 'model_providers.devinx.name="devinx"',
-        "-c", f'model_providers.devinx.base_url="http://{HOST}:{PORT}/v1"',
-        "-c", 'model_providers.devinx.wire_api="responses"',
-        # Codex then sends its own credential, which devinx relays untouched to
+        "-c", 'model_providers.ccproxy.name="ccproxy"',
+        "-c", f'model_providers.ccproxy.base_url="http://{HOST}:{PORT}/v1"',
+        "-c", 'model_providers.ccproxy.wire_api="responses"',
+        # Codex then sends its own credential, which ccproxy relays untouched to
         # the upstream a gpt-* model would have gone to anyway.
-        "-c", "model_providers.devinx.requires_openai_auth=true",
-        "-c", 'model_provider="devinx"',
+        "-c", "model_providers.ccproxy.requires_openai_auth=true",
+        "-c", 'model_provider="ccproxy"',
         # The V1 multi-agent surface. On V2 a spawned agent's task is ciphertext
         # only OpenAI can open, so a SWE-2 executor would receive the envelope
         # and none of the letter; on V1 the same task arrives in the clear.
@@ -580,13 +581,13 @@ def codex_args(orchestrate, add_profile=True):
     # does not reach, so the entry stays at whatever config.toml says.
     #
     # A profile does exactly what is wanted instead. install.py writes
-    # devinx.config.toml next to config.toml, where it is inert, and selecting
+    # ccproxy.config.toml next to config.toml, where it is inert, and selecting
     # it here layers the marketplace and the enable on top for this session
     # only. A plain codex session never names the profile and so never sees the
     # skill.
     if add_profile and os.path.exists(
-            os.path.join(codex_home(), "devinx.config.toml")):
-        args += ["-p", "devinx"]
+            os.path.join(codex_home(), "ccproxy.config.toml")):
+        args += ["-p", "ccproxy"]
         _warn_stale_codex_cache()
     return args
 
@@ -638,7 +639,7 @@ def _warn_stale_codex_cache():
             packaged_hash = hashlib.sha256(fh.read()).hexdigest()
     except OSError:
         return
-    cache_root = os.path.join(codex_home(), "plugins", "cache", "devinx",
+    cache_root = os.path.join(codex_home(), "plugins", "cache", "ccproxy",
                               "swe-orchestrator")
     for candidate in codex_cache_paths(cache_root, version):
         try:
@@ -648,14 +649,14 @@ def _warn_stale_codex_cache():
             continue
         if cached_hash != packaged_hash:
             sys.stderr.write(
-                f"devinx: the cached Codex skill at {candidate} does not "
+                f"ccproxy: the cached Codex skill at {candidate} does not "
                 f"match version {version} of this package. Run "
                 f"`python3 install.py` again to refresh it.\n")
         return
     # Neither shape exists under this version: not materialised yet for the
     # version this package declares.
     sys.stderr.write(
-        f"devinx: the Codex skill cache has nothing for version {version} "
+        f"ccproxy: the Codex skill cache has nothing for version {version} "
         f"of this package yet. Run `python3 install.py` to install it.\n")
 
 
@@ -698,7 +699,7 @@ def _warn_windows_cmd_shim(binary, args):
     length = len(subprocess.list2cmdline(args))
     if length > _WINDOWS_CMDLINE_LIMIT:
         sys.stderr.write(
-            f"devinx: the command line is {length} characters, over "
+            f"ccproxy: the command line is {length} characters, over "
             f"cmd.exe's {_WINDOWS_CMDLINE_LIMIT}-character limit, and "
             f"{binary} runs through cmd.exe even though this process does "
             f"not. The injected --agents JSON is the likely cause; a native "
@@ -712,7 +713,7 @@ def local_build():
 
 # A loopback readiness check must not travel through a shell's HTTP proxy —
 # diagnostics.py already does this; the launcher's own probes did not, and a
-# proxy configured for the rest of the network made a running devinx look
+# proxy configured for the rest of the network made a running ccproxy look
 # foreign or made a fresh start time out at 40s waiting for an answer that was
 # sent straight to the proxy instead.
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -722,9 +723,9 @@ def service_state():
     """Return (state, info) for whatever holds the port.
 
     absent  - nothing is listening
-    foreign - something is, but it is not devinx
-    stale   - devinx, running code older than the file on disk
-    fresh   - devinx, running this code
+    foreign - something is, but it is not ccproxy
+    stale   - ccproxy, running code older than the file on disk
+    fresh   - ccproxy, running this code
 
     The service deliberately outlives the sessions that use it, so closing a
     session does not restart it and a pull leaves last week's code serving
@@ -743,13 +744,14 @@ def service_state():
                           timeout=3) as r:
             info = json.loads(r.read())
     except Exception:
-        # A devinx old enough to predate /api/hello still answers /v1/models.
+        # A ccproxy old enough to predate /api/hello still answers /v1/models.
         return ("stale", {}) if listening() else ("foreign", {})
     # A well-formed JSON reply that is not an object (e.g. a foreign service
     # that happens to answer with a JSON array) must not crash the launcher.
-    if not isinstance(info, dict) or info.get("service") != "devinx":
+    # "devinx" is this service under its former name: stale, not foreign.
+    if not isinstance(info, dict) or info.get("service") not in ("ccproxy", "devinx"):
         return "foreign", {}
-    # Saying "devinx" costs nothing; answering the challenge takes the
+    # Saying "ccproxy" costs nothing; answering the challenge takes the
     # install's secret, which only this user can read. A build old enough to
     # predate the proof sends none, and is judged on the socket owner above.
     if "proof" in info:
@@ -759,8 +761,8 @@ def service_state():
             expected = None
         if not expected or not hmac.compare_digest(str(info["proof"]), expected):
             sys.stderr.write(
-                f"devinx: the service on {HOST}:{PORT} failed the identity check "
-                f"(another user's process, or a devinx with another data "
+                f"ccproxy: the service on {HOST}:{PORT} failed the identity check "
+                f"(another user's process, or a ccproxy with another data "
                 f"directory); not using it\n")
             return "foreign", {}
     want = local_build()
@@ -792,8 +794,8 @@ def _listener_is_ours():
     return True
 
 
-def _pid_runs_devinx(pid):
-    """POSIX only: confirm the pid's own command line actually runs devinx.py
+def _pid_runs_ccproxy(pid):
+    """POSIX only: confirm the pid's own command line actually runs ccproxy.py
     before it is ever signalled.
 
     /api/hello answers with whatever pid the *listening* process reports, and
@@ -802,15 +804,15 @@ def _pid_runs_devinx(pid):
     port can all put an unrelated pid in that field. An unreadable cmdline (a
     permission error, a pid that has already exited, a platform with no
     /proc) is treated as *not* verified: refusing to stop is the safe
-    direction, and a real devinx always answers this.
+    direction, and a real ccproxy always answers this.
     """
     try:
         if sys.platform == "darwin":
             r = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
                                capture_output=True, text=True, timeout=3)
-            return r.returncode == 0 and "devinx.py" in r.stdout
+            return r.returncode == 0 and "ccproxy.py" in r.stdout
         with open(f"/proc/{pid}/cmdline", "rb") as fh:
-            return b"devinx.py" in fh.read()
+            return b"ccproxy.py" in fh.read()
     except (OSError, subprocess.SubprocessError, ValueError):
         return False
 
@@ -819,7 +821,7 @@ def _win_terminate(pid):
     """Ask nicely before taskkill /F.
 
     Plain `taskkill /PID` sends a close message a console-less, detached
-    process (exactly how start_service() launches devinx on Windows) usually
+    process (exactly how start_service() launches ccproxy on Windows) usually
     has no window or message loop to receive — this fallback path is
     therefore unverified on real Windows, but trying the graceful form first
     costs one round trip and never makes the forceful one land later than it
@@ -845,7 +847,7 @@ def _kill_hint(pid):
 
 
 def stop_service(info):
-    """Stop a devinx we identified ourselves. Never a pid we merely guessed."""
+    """Stop a ccproxy we identified ourselves. Never a pid we merely guessed."""
     pid = info.get("pid")
     # bool is a subclass of int (isinstance(True, int) is True), so it has to
     # be rejected before the int check, and again explicitly: True == 1 would
@@ -860,7 +862,7 @@ def stop_service(info):
     if sys.platform != "win32":
         if pid == os.getpgrp():
             return False
-        if not _pid_runs_devinx(pid):
+        if not _pid_runs_ccproxy(pid):
             return False
     try:
         if sys.platform == "win32":
@@ -880,11 +882,11 @@ def stop_service(info):
 
 
 def listening():
-    """True only if *devinx* answers on the port.
+    """True only if *ccproxy* answers on the port.
 
     A bare TCP connect would also succeed for an unrelated process holding the
     port, and Claude Code would then be pointed at it and fail in confusing ways.
-    Checking that the model list carries a devinx entry makes a port conflict
+    Checking that the model list carries a ccproxy entry makes a port conflict
     deterministic instead of silent. This guards against accidents, not against a
     hostile local process.
     """
@@ -898,34 +900,28 @@ def listening():
         data = parsed.get("data") or [] if isinstance(parsed, dict) else []
         # The exact alias, not a swe-2* prefix: an older gateway sharing this
         # port advertises swe-2-max and friends without knowing `swe-2`, so a
-        # prefix match accepted it as devinx and Claude Code was pointed at a
+        # prefix match accepted it as ccproxy and Claude Code was pointed at a
         # service that would then refuse the model this launcher selects. With
         # Devin access off the catalog has no swe row at all, so every row
-        # devinx serves also says who serves it.
+        # ccproxy serves also says who serves it.
         return any(isinstance(m, dict) and (m.get("id") == SWE_ALIAS
-                                            or m.get("owned_by") == "devinx")
+                                            or m.get("owned_by") in ("ccproxy", "devinx"))
                    for m in data)
     except Exception:
         return False
 
 
 def data_dir():
-    if os.environ.get("DEVINX_DATA"):
-        return os.path.normpath(os.environ["DEVINX_DATA"])
-    if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    elif sys.platform == "darwin":
-        base = os.path.expanduser("~/Library/Application Support")
-    else:
-        base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
-    return os.path.normpath(os.path.join(base, "devinx"))
+    """Per-OS writable location for credentials, logs and runtime state; the
+    old devinx directory until it has been moved (runtime_support)."""
+    return runtime_support.data_dir()
 
 
 # What the detached daemon is allowed to inherit. It outlives every session
 # that starts it and is shared by every session that finds it already
 # running, so a one-off shell export must not become a permanent, invisible
 # part of its configuration.
-_DAEMON_ENV_PREFIXES = ("DEVINX_", "XDG_")
+_DAEMON_ENV_PREFIXES = ("CCPROXY_", "XDG_")
 _DAEMON_ENV_EXACT = {
     "PATH", "HOME",
     "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_COLLATE", "LC_TIME",
@@ -949,14 +945,14 @@ _DAEMON_ENV_EXACT = {
 # Loud on purpose: these two change what the *service* does for every session
 # that shares it afterwards (persisting conversations to disk; dropping the
 # browser-origin guard), not just the one that happened to set them.
-_LOUD_DAEMON_ENV = ("DEVINX_DUMP", "DEVINX_ALLOW_BROWSER")
+_LOUD_DAEMON_ENV = ("CCPROXY_DUMP", "CCPROXY_ALLOW_BROWSER")
 
 
 def _daemon_env():
-    """The environment start_service() launches devinx.py with.
+    """The environment start_service() launches ccproxy.py with.
 
     A detached daemon that inherits the whole shell keeps whatever one session
-    happened to have set - DEVINX_DUMP, DEVINX_ALLOW_BROWSER, unrelated
+    happened to have set - CCPROXY_DUMP, CCPROXY_ALLOW_BROWSER, unrelated
     credentials in the caller's environment - for every later session that
     shares the port, silently. Only what the service actually needs crosses
     over.
@@ -967,18 +963,18 @@ def _daemon_env():
     for name in _LOUD_DAEMON_ENV:
         if name in env:
             sys.stderr.write(
-                f"devinx: {name} is set - it will apply to every session "
+                f"ccproxy: {name} is set - it will apply to every session "
                 f"that uses this service from now on, not just this one.\n")
     return env
 
 
 def start_service():
-    """Spawn devinx.py detached so it outlives this launcher and the claude
+    """Spawn ccproxy.py detached so it outlives this launcher and the claude
     run. Returns the Popen handle so a caller can poll for an immediate crash
     instead of only finding out after waiting the full startup timeout."""
     log_dir = data_dir()
     os.makedirs(log_dir, exist_ok=True)
-    log = open(os.path.join(log_dir, "devinx.log"), "ab")
+    log = open(os.path.join(log_dir, "ccproxy.log"), "ab")
     kwargs = {"stdout": log, "stderr": log, "stdin": subprocess.DEVNULL,
               "cwd": HERE, "env": _daemon_env()}
     if sys.platform == "win32":
@@ -988,7 +984,7 @@ def start_service():
     else:
         kwargs["start_new_session"] = True
     return subprocess.Popen(
-        [sys.executable, os.path.join(HERE, "devinx.py")], **kwargs)
+        [sys.executable, os.path.join(HERE, "ccproxy.py")], **kwargs)
 
 
 def _log_tail(path, lines=20):
@@ -1005,36 +1001,36 @@ def _log_tail(path, lines=20):
         return "(no log available)"
 
 
-# devinx.py's own parser for each variable it reads with int()/float() at
+# ccproxy.py's own parser for each variable it reads with int()/float() at
 # import time, with nothing catching a bad value there. diagnostics.py's
 # parse_config_value() uses float() for everything (fine for comparing
 # against a running service's reported value - 12.0 == 12 either way) but
-# is the wrong check to gate a start with: DEVINX_RATE_WAIT=1.5 passes
-# float() and then devinx.py dies on `int("1.5")` before ever binding the
-# port. This map has to match devinx.py's actual parser per variable, not
+# is the wrong check to gate a start with: CCPROXY_RATE_WAIT=1.5 passes
+# float() and then ccproxy.py dies on `int("1.5")` before ever binding the
+# port. This map has to match ccproxy.py's actual parser per variable, not
 # diagnostics.py's.
-_DEVINX_ENV_PARSERS = {
-    'DEVINX_PORT': int, 'DEVINX_CONTEXT_TOKENS': int, 'DEVINX_MAX_BODY': int,
-    'DEVINX_DRAIN': int, 'DEVINX_DASHBOARD_PORT': int,
-    'DEVINX_MID_CONV_REFUSALS': int, 'DEVINX_MAX_INFLIGHT': int,
-    'DEVINX_RATE_WAIT': int, 'DEVINX_KEEPALIVE': int, 'DEVINX_PACE': int,
-    'DEVINX_PACE_WINDOW': int, 'DEVINX_NETWORK_RETRIES': int,
-    'DEVINX_MAX_FRAME': int, 'DEVINX_SUMMARY_TOKENS': int,
-    'DEVINX_LEAD_CAP': int, 'DEVINX_MAX_INFLATED_FRAME': int,
-    'DEVINX_COMPACT_AT': int, 'DEVINX_STATS_TTL': float,
-    'DEVINX_HTTP_READ_TIMEOUT': float, 'DEVINX_CLIENT_WRITE_TIMEOUT': float,
-    'DEVINX_RELAY_READ_TIMEOUT': float, 'DEVINX_MAX_SWE_INFLIGHT': int,
-    'DEVINX_RATE_FLOOR': float, 'DEVINX_RESCAN': float,
+_CCPROXY_ENV_PARSERS = {
+    'CCPROXY_PORT': int, 'CCPROXY_CONTEXT_TOKENS': int, 'CCPROXY_MAX_BODY': int,
+    'CCPROXY_DRAIN': int, 'CCPROXY_DASHBOARD_PORT': int,
+    'CCPROXY_MID_CONV_REFUSALS': int, 'CCPROXY_MAX_INFLIGHT': int,
+    'CCPROXY_RATE_WAIT': int, 'CCPROXY_KEEPALIVE': int, 'CCPROXY_PACE': int,
+    'CCPROXY_PACE_WINDOW': int, 'CCPROXY_NETWORK_RETRIES': int,
+    'CCPROXY_MAX_FRAME': int, 'CCPROXY_SUMMARY_TOKENS': int,
+    'CCPROXY_LEAD_CAP': int, 'CCPROXY_MAX_INFLATED_FRAME': int,
+    'CCPROXY_COMPACT_AT': int, 'CCPROXY_STATS_TTL': float,
+    'CCPROXY_HTTP_READ_TIMEOUT': float, 'CCPROXY_CLIENT_WRITE_TIMEOUT': float,
+    'CCPROXY_RELAY_READ_TIMEOUT': float, 'CCPROXY_MAX_SWE_INFLIGHT': int,
+    'CCPROXY_RATE_FLOOR': float, 'CCPROXY_RESCAN': float,
 }
 
 
-def _validate_devinx_env():
-    """Reject an unparsable DEVINX_* runtime setting before spawning a service
+def _validate_ccproxy_env():
+    """Reject an unparsable CCPROXY_* runtime setting before spawning a service
     that would otherwise start with a silently wrong default, or not at all -
-    devinx.py parses each of these with nothing catching a bad value.
+    ccproxy.py parses each of these with nothing catching a bad value.
     """
     bad = []
-    for name, parser in _DEVINX_ENV_PARSERS.items():
+    for name, parser in _CCPROXY_ENV_PARSERS.items():
         if name not in os.environ:
             continue
         try:
@@ -1043,7 +1039,7 @@ def _validate_devinx_env():
             bad.append(name)
     if bad:
         sys.stderr.write(
-            "devinx: not starting - invalid value for "
+            "ccproxy: not starting - invalid value for "
             + ", ".join(f"{n}={os.environ[n]!r}" for n in bad) + "\n")
         return False
     return True
@@ -1065,14 +1061,17 @@ def ensure_service():
         with startup_lock(data_dir(), PORT, START_TIMEOUT + 35):
             state, info = service_state()
             if state == "foreign":
-                sys.stderr.write(f"devinx: another service owns {HOST}:{PORT}; not starting or stopping it\n")
+                sys.stderr.write(f"ccproxy: another service owns {HOST}:{PORT}; not starting or stopping it\n")
                 return False
             if state == "stale":
                 # Restarting under a turn that is mid-flight must not cut it in
                 # half: a busy service is replaced only if it drains.
                 config = info.get("configuration") if isinstance(info, dict) else None
                 config = config if isinstance(config, dict) else {}
-                drain, budget = config.get("DEVINX_DRAIN"), config.get("DEVINX_RATE_WAIT")
+                # A service from before the rename reports its settings under
+                # their DEVINX_* names.
+                drain = config.get("CCPROXY_DRAIN", config.get("DEVINX_DRAIN"))
+                budget = config.get("CCPROXY_RATE_WAIT", config.get("DEVINX_RATE_WAIT"))
                 # A busy service is replaced only when it says it will finish
                 # what it holds: its drain covers its own wait budget. Older
                 # builds drained for 300s against a 1800s budget and would cut
@@ -1083,20 +1082,20 @@ def ensure_service():
                                 and drain >= budget)
                 if info.get("inflight") and not drains_fully:
                     sys.stderr.write(
-                        f"devinx: the service on {PORT} is running older code and is "
+                        f"ccproxy: the service on {PORT} is running older code and is "
                         f"busy ({info['inflight']} request(s) in flight).\n"
                         f"        Continuing with it. Restart when it is idle: "
                         f"{_kill_hint(info.get('pid'))}\n")
                     state = "fresh"
                 elif stop_service(info):
                     sys.stderr.write(
-                        "devinx: replacing a service running older code"
+                        "ccproxy: replacing a service running older code"
                         + (f"; its {info['inflight']} request(s) in flight finish "
                            f"in the old process\n" if info.get("inflight") else "\n"))
                     state = "absent"
                 else:
                     sys.stderr.write(
-                        "devinx: the service on this port is running older code and "
+                        "ccproxy: the service on this port is running older code and "
                         "could not be stopped automatically.\n"
                         "        Stop it by hand and run again"
                         + (f": {_kill_hint(info['pid'])}\n" if info.get("pid") else ".\n"))
@@ -1104,15 +1103,15 @@ def ensure_service():
 
             if state == "fresh":
                 # A daemon that is already up does not reread its environment;
-                # a DEVINX_* setting this run asked for and the running one
+                # a CCPROXY_* setting this run asked for and the running one
                 # does not have is silently unapplied unless said out loud.
                 import diagnostics
                 config = info.get("configuration") if isinstance(info, dict) else {}
                 for warning in diagnostics.configuration_mismatches(os.environ, config or {}):
-                    sys.stderr.write(f"devinx: {warning}\n")
+                    sys.stderr.write(f"ccproxy: {warning}\n")
 
             if state != "fresh":
-                if not _validate_devinx_env():
+                if not _validate_ccproxy_env():
                     return False
                 proc = start_service()
                 deadline = time.time() + START_TIMEOUT
@@ -1120,21 +1119,21 @@ def ensure_service():
                     if listening():
                         break
                     if proc.poll() is not None:
-                        log_path = os.path.join(data_dir(), "devinx.log")
+                        log_path = os.path.join(data_dir(), "ccproxy.log")
                         sys.stderr.write(
-                            f"devinx: the service exited immediately "
+                            f"ccproxy: the service exited immediately "
                             f"(code {proc.returncode}) instead of starting.\n"
                             f"{_log_tail(log_path)}\n")
                         return False
                     time.sleep(0.5)
                 else:
                     sys.stderr.write(
-                        f"devinx failed to start on {HOST}:{PORT}\n"
-                        f"check {os.path.join(data_dir(), 'devinx.log')}\n")
+                        f"ccproxy failed to start on {HOST}:{PORT}\n"
+                        f"check {os.path.join(data_dir(), 'ccproxy.log')}\n")
                     return False
             return True
     except (OSError, TimeoutError) as error:
-        sys.stderr.write(f"devinx: could not coordinate service startup: {error}\n")
+        sys.stderr.write(f"ccproxy: could not coordinate service startup: {error}\n")
         return False
 
 
@@ -1142,10 +1141,10 @@ _KNOWN_OWN_FLAGS = DEVIN_FLAGS | ORCH_FLAGS | CODEX_FLAGS | PLAIN_FLAGS
 
 
 def _diagnostic_flag(argv):
-    """Find a devinx diagnostic flag before `--` and before any client
+    """Find a ccproxy diagnostic flag before `--` and before any client
     subcommand or prompt, e.g. `--d --status` as well as plain `--status`.
 
-    Every token ahead of it has to be one of devinx's own flags, or the
+    Every token ahead of it has to be one of ccproxy's own flags, or the
     position is ambiguous - `-p --status` most likely means the client should
     see a literal `--status`, so that is left alone rather than guessed at.
     """
@@ -1177,6 +1176,9 @@ def _kimi_flag(argv):
 
 
 def main():
+    # Before anything reads the data directory: a devinx one moves to its
+    # ccproxy name (and is used where it is if it cannot).
+    runtime_support.migrate_data_dir()
     account = _kimi_flag(sys.argv[1:])
     if account is not None:
         # Account management, not a session: nothing is started or launched.
@@ -1191,8 +1193,8 @@ def main():
         # The skill and its hooks delegate to swe2-* agents, which are not
         # offered while Devin access is off; injecting it would advertise an
         # orchestrator with nobody to orchestrate.
-        sys.stderr.write("devinx: --or needs SWE-2, which is disabled "
-                         "(DEVINX_SWE=1 re-enables it); running without it\n")
+        sys.stderr.write("ccproxy: --or needs SWE-2, which is disabled "
+                         "(CCPROXY_SWE=1 re-enables it); running without it\n")
         use_orch = False
 
     client = "codex" if use_codex else "claude"
@@ -1206,7 +1208,7 @@ def main():
 
     if not use_devin:
         # Plain Claude Code: no service, no injected configuration, no extra
-        # flags. The one thing removed is a base URL pointing at devinx itself,
+        # flags. The one thing removed is a base URL pointing at ccproxy itself,
         # inherited from a parent devin-mode session — leaving it would silently
         # route "plain" through the proxy, which is the opposite of the intent.
         if env.get("ANTHROPIC_BASE_URL", "").rstrip("/") == f"http://{HOST}:{PORT}":
@@ -1227,11 +1229,11 @@ def main():
         has_profile = _has_profile_flag(split_at_separator(passthrough)[0])
         if has_profile and use_orch:
             sys.stderr.write(
-                "devinx: -p/--profile was already given; the orchestrator "
+                "ccproxy: -p/--profile was already given; the orchestrator "
                 "profile was not applied (swe-orchestrator will not load)\n")
         # Codex is configured entirely through -c overrides, so none of the
         # Anthropic environment applies and nothing of the user's own config is
-        # touched. It authenticates as itself; devinx relays that credential.
+        # touched. It authenticates as itself; ccproxy relays that credential.
         _add_no_proxy(env)
         args = [binary] + codex_args(use_orch, add_profile=not has_profile) + passthrough
         if sys.platform == "win32":
@@ -1251,7 +1253,7 @@ def main():
     # Both injected option groups go right after the binary, ahead of anything
     # of the user's: a client subcommand anywhere in `head` (`mcp`, `plugin`,
     # `doctor`) is parsed as positional and stops recognising options typed
-    # after it, which is exactly what broke `devinx --d mcp ...` before.
+    # after it, which is exactly what broke `ccproxy --d mcp ...` before.
     args = ([claude] + plugin_args(use_orch) + picker_settings(head)
             + merge_agents(head, packaged_agents()) + tail)
     _warn_windows_cmd_shim(claude, args)
