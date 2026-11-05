@@ -776,6 +776,9 @@ def main():
     check_claude()
     check_descriptors()
     py = make_venv(args.force, args.port)
+    # A devinx data directory moves to its ccproxy name here, as on the
+    # launcher's first run; one a running service holds open stays put.
+    runtime_support.migrate_data_dir()
     os.makedirs(data_dir(), exist_ok=True)
     say(OK, f"data directory: {data_dir()}")
     if args.global_agents:
