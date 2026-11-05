@@ -45,6 +45,7 @@ import time
 import uuid
 from datetime import datetime
 from runtime_support import CONFIG_FIELDS, PortLock, build_id, hello_proof, service_secret, swe_enabled
+import kimi
 from http.cookiejar import DefaultCookiePolicy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
@@ -223,6 +224,9 @@ def repair_tool_ids(body):
 # whole request — and Claude Code resends the history every turn, so a session
 # that ran a turn on gpt-* would stay refused on claude-* until /clear.
 FOREIGN_SIGNATURE_PREFIX = "ccp:"
+# Thinking another upstream signed: GPT through the sidecar (ccp:) and Kimi,
+# whose signatures devinx tags on the way out (see kimi.SIGNATURE_PREFIX).
+FOREIGN_SIGNATURE_PREFIXES = (FOREIGN_SIGNATURE_PREFIX, kimi.SIGNATURE_PREFIX)
 
 
 def gpt_context_tokens(model):
@@ -261,6 +265,40 @@ def gpt_error(status, text, body):
                 f"prompt is too long: {estimate_tokens(body)} tokens > "
                 f"{gpt_context_tokens(body.get('model'))} maximum")
     return None
+
+
+def kimi_error(status, text, body, why=None):
+    """Say what a Kimi error means to Claude Code.
+
+    Kimi's context refusal ("Your request exceeded k3-256k model token limit:
+    262144") carries the limit but not the size, and the client only recovers
+    from an overflow it can read both numbers out of. With `why` (a subagent
+    not yet compacted harder) it asks for one more try instead.
+    """
+    limit = kimi.overflow(status, text)
+    if limit is None:
+        return None
+    if why is not None:
+        why["retry"] = "compact"
+        return RETRY
+    return (400, "invalid_request_error",
+            f"prompt is too long: {estimate_tokens(body)} tokens > "
+            f"{limit} maximum")
+
+
+def kimi_status():
+    """The Kimi accounts as the dashboard shows them: usage of the 5-hour and
+    monthly windows (read from Kimi at most once a minute per account) and
+    whether one is blocked or refused. Never the key."""
+    out = []
+    for a in KIMI_POOL.snapshot():
+        info = kimi.usage(a, SESSION) or {}
+        out.append({"name": a["name"],
+                    "refused": a.get("invalid") is not None,
+                    "blocked_for": max(0, round(a["blocked_until"] - time.time())),
+                    "used_5h": (info.get("5h") or (None,))[0],
+                    "used_month": (info.get("month") or (None,))[0]})
+    return out
 
 
 # --- advisor on the gpt-* route ---------------------------------------------
@@ -667,11 +705,12 @@ def _foreign(block):
     return (isinstance(block, dict)
             and block.get("type") in ("thinking", "redacted_thinking")
             and str(block.get("signature") or "").startswith(
-                FOREIGN_SIGNATURE_PREFIX))
+                FOREIGN_SIGNATURE_PREFIXES))
 
 
 def strip_foreign_thinking(body, keep_text=False):
-    """Take GPT-signed thinking out of a history bound for another upstream.
+    """Take GPT- or Kimi-signed thinking out of a history bound for another
+    upstream.
 
     With keep_text the block stays and only its signature goes: Cognition
     accepts replayed thinking unsigned. Without it the block goes entirely,
@@ -1337,6 +1376,10 @@ _accounts = []
 # account is exactly the kind of change that should not need one.
 RESCAN_EVERY = float(os.environ.get("DEVINX_RESCAN", "30"))
 _scan = {"at": 0.0, "sig": None}
+# The Kimi Code accounts, read from <data dir>/kimi/*.key (or
+# DEVINX_KIMI_KEYS) on first use and rescanned like the Devin credentials.
+KIMI_POOL = kimi.Pool(DATA_DIR, RESCAN_EVERY)
+RELAYED_SSE = {"claude", "gpt", "kimi"}
 
 
 def _credential_signature():
@@ -2706,6 +2749,60 @@ def _summarise_once(messages, model, system, previous, turn):
         return None
 
 
+class _GptSummaries:
+    """Where a GPT subagent's summary is written: the sidecar, on the agent's
+    own model."""
+    label = "gpt"
+    unreachable = "sidecar unreachable"
+
+    def payload(self, payload):
+        # Extraction over a long transcript: medium is enough, and it is what
+        # keeps a summary at seconds rather than the minutes high effort spends.
+        payload["output_config"] = {"effort": "medium"}
+        return payload
+
+    def claim(self):
+        """(url, headers, account) for one attempt, or (None, wait, None)
+        when nothing can take it now (wait None: never)."""
+        return (GPT_UPSTREAM + "/v1/messages",
+                {"anthropic-version": "2023-06-01"}, None)
+
+    def refused(self, acct, response):
+        """Whether the refusal was the account's, and another may be tried
+        at once."""
+        return False
+
+
+class _KimiSummaries(_GptSummaries):
+    """Where a Kimi subagent's summary is written: Kimi, on the agent's own
+    model, through whichever account is free."""
+    label = "kimi"
+    unreachable = "Kimi unreachable"
+
+    def payload(self, payload):
+        payload = kimi.prepare(payload, kimi.upstream_model(payload["model"])
+                               or payload["model"])
+        payload["output_config"] = {"effort": "high"}
+        return payload
+
+    def claim(self):
+        acct, wait = KIMI_POOL.claim()
+        if acct is None:
+            return None, wait, None
+        return (kimi.UPSTREAM + "/v1/messages",
+                {"anthropic-version": "2023-06-01", "x-api-key": acct["key"]},
+                acct)
+
+    def refused(self, acct, response):
+        why = kimi.account_refusal(response.status_code, response.text[:4000])
+        if why == "auth":
+            KIMI_POOL.invalidate(acct)
+        elif why == "quota":
+            KIMI_POOL.block(acct, kimi.block_seconds(
+                acct, response.headers.get("retry-after"), SESSION), "summary")
+        return why is not None
+
+
 def _summarise_once_gpt(messages, model, system, previous, turn):
     """_summarise_once for a GPT conversation: the same summary request, sent
     to the claude-code-proxy sidecar on the agent's own model, so what a GPT
@@ -2715,26 +2812,44 @@ def _summarise_once_gpt(messages, model, system, previous, turn):
     an empty answer) within the turn's budget; None when the budget is spent
     or the error will not pass; _TOO_LONG when the piece has to be split.
     """
-    payload = _summary_body(messages, model, system, previous)
-    # Extraction over a long transcript: medium is enough, and it is what keeps
-    # a summary at seconds rather than the minutes high effort spends.
-    payload["output_config"] = {"effort": "medium"}
+    return _summarise_once_relayed(messages, model, system, previous, turn,
+                                   _GptSummaries())
+
+
+def _summarise_once_kimi(messages, model, system, previous, turn):
+    """_summarise_once_gpt for a Kimi conversation, written by Kimi."""
+    return _summarise_once_relayed(messages, model, system, previous, turn,
+                                   _KimiSummaries())
+
+
+def _summarise_once_relayed(messages, model, system, previous, turn, target):
+    payload = target.payload(_summary_body(messages, model, system, previous))
+    label = target.label
     t0, drops, empties = time.time(), 0, 0
     while True:
         turn.check()
         left = turn.left()
         if left <= 0:
-            print(f"summary(gpt): {time.time() - t0:.0f}s spent without an "
+            print(f"summary({label}): {time.time() - t0:.0f}s spent without an "
                   f"answer", flush=True)
             return None
+        url, headers, acct = target.claim()
+        if url is None:
+            if headers is None:
+                print(f"summary({label}): no account to write it", flush=True)
+                return None
+            wait = min(headers, left)
+            print(f"summary({label}): every account is spent, waiting "
+                  f"{wait:.0f}s", flush=True)
+            turn.sleep(wait)
+            continue
         try:
-            r = SESSION.post(GPT_UPSTREAM + "/v1/messages", json=payload,
-                             headers={"anthropic-version": "2023-06-01"},
+            r = SESSION.post(url, json=payload, headers=headers,
                              timeout=(10, max(30.0, min(left, 600.0))))
         except requests.RequestException as e:
             drops += 1
             wait = min(2 ** drops, 30, left)
-            print(f"summary(gpt): sidecar unreachable ({type(e).__name__}), "
+            print(f"summary({label}): {target.unreachable} ({type(e).__name__}), "
                   f"retrying in {wait:.0f}s", flush=True)
             turn.sleep(wait)
             continue
@@ -2752,16 +2867,19 @@ def _summarise_once_gpt(messages, model, system, previous, turn):
                 got = "".join(b.get("thinking", "") for b in blocks
                               if b.get("type") == "thinking").strip()
             if got:
-                print(f"summary(gpt) done: latency={time.time() - t0:.1f}s "
+                print(f"summary({label}) done: latency={time.time() - t0:.1f}s "
                       f"chars={len(got)} model={model}", flush=True)
                 return got
             empties += 1
             if empties <= 2:
-                print("summary(gpt): empty answer, asking again", flush=True)
+                print(f"summary({label}): empty answer, asking again", flush=True)
                 continue
             return None
-        if r.status_code == 413 or "too long" in text.lower():
+        if (r.status_code == 413 or "too long" in text.lower()
+                or kimi.overflow(r.status_code, text) is not None):
             return _TOO_LONG
+        if acct is not None and target.refused(acct, r):
+            continue
         if r.status_code in (429, 500, 502, 503, 504, 529):
             drops += 1
             try:
@@ -2769,11 +2887,11 @@ def _summarise_once_gpt(messages, model, system, previous, turn):
             except ValueError:
                 wait = 0
             wait = min(wait or min(5 * 2 ** (drops - 1), 120), left)
-            print(f"summary(gpt): {r.status_code}, waiting {wait:.0f}s",
+            print(f"summary({label}): {r.status_code}, waiting {wait:.0f}s",
                   flush=True)
             turn.sleep(wait)
             continue
-        print(f"summary(gpt): giving up on {r.status_code} {text[:120]}",
+        print(f"summary({label}): giving up on {r.status_code} {text[:120]}",
               flush=True)
         return None
 
@@ -4707,7 +4825,8 @@ class Handler(BaseHTTPRequestHandler):
                                    # reconstruct after the fact.
                                    "blocked_for": max(0, round(
                                        a.get("blocked_until", 0) - time.time()))}
-                                  for a in _accounts]}
+                                  for a in _accounts],
+                              "kimi": kimi_status()}
         payload["active_requests"] = live_requests()
         payload["tail"] = _log_tail(60)
         self.send_json(200, payload)
@@ -4862,6 +4981,15 @@ class Handler(BaseHTTPRequestHandler):
                     "runtime": {"max_input_tokens": gpt_context_tokens(mid),
                                 "max_output_tokens": 128000}}
                    for mid, name in GPT_MODELS]
+        if KIMI_POOL.snapshot():
+            models += [{"type": "model", "id": mid, "display_name": f"Kimi {label}",
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "object": "model", "created": 1767225600,
+                        "owned_by": "devinx",
+                        "context_window": window,
+                        "runtime": {"max_input_tokens": window,
+                                    "max_output_tokens": 128000}}
+                       for mid, (_, label, window) in kimi.known_models().items()]
         # `data` is what Claude Code reads, `models` what Codex reads; serving
         # both means one endpoint rather than one per client dialect.
         self.send_json(200, {"data": models, "models": self.codex_catalog(),
@@ -4989,6 +5117,16 @@ class Handler(BaseHTTPRequestHandler):
             self.serve_gpt(raw, body, model, path)
             return
 
+        if model.startswith(kimi.PREFIX):
+            # Spends a Kimi key devinx holds: the same rule as SWE-2 and GPT.
+            if self.browser_origin():
+                self.send_error_json(
+                    403, "permission_error",
+                    "Refusing a browser-originated request on the Kimi route")
+                return
+            self.serve_kimi(body, model, path)
+            return
+
         if not model.startswith("claude-"):
             self.send_error_json(400, "invalid_request_error", "Unsupported model")
             return
@@ -5005,7 +5143,8 @@ class Handler(BaseHTTPRequestHandler):
             print("repaired tool ids carried by an older transcript", flush=True)
         if strip_foreign_thinking(body):
             repaired = True
-            print("dropped GPT-signed thinking from a claude-* history", flush=True)
+            print("dropped GPT- or Kimi-signed thinking from a claude-* history",
+                  flush=True)
         if repaired:
             raw = json.dumps(body).encode()
         self.relay(raw, model, CLAUDE_UPSTREAM + self.path, "claude")
@@ -5157,8 +5296,123 @@ class Handler(BaseHTTPRequestHandler):
             if sent is not RETRY:
                 return
 
-    def compact_gpt(self, body, force=False, committed=False):
-        """Reduce a GPT subagent's history before it outgrows the window.
+    def serve_kimi(self, body, model, path):
+        """Relay a Claude Code kimi-* turn to Kimi Code with a key devinx holds.
+
+        Kimi speaks Messages natively, so the body goes nearly as it came:
+        the model id, the effort level and Kimi's own signatures are put back
+        in its terms (kimi.prepare), the advisor server tool is taken out
+        (nobody would run it), and the client's credential never leaves.
+
+        An account refused for its key or its quota is set aside and the turn
+        goes to the next one, which is safe because a refusal arrives before
+        anything is sent to the client. A subagent is compacted here, as on
+        gpt-*, and a context refusal is retried once, cut harder.
+        """
+        upstream = kimi.upstream_model(model)
+        accounts = KIMI_POOL.snapshot()
+        if upstream is None and accounts and kimi.refresh_catalog(
+                accounts[0]["key"], SESSION):
+            upstream = kimi.upstream_model(model)
+        if upstream is None:
+            known = ", ".join(sorted(kimi.known_models()))
+            self.send_error_json(400, "invalid_request_error",
+                                 f"Unknown Kimi model {model!r}; known: {known}")
+            return
+        if not accounts:
+            self.send_error_json(503, "api_error",
+                                 "devinx has no Kimi account: run `devinx --kimi-add`")
+            return
+        agent = (path == "/v1/messages"
+                 and bool(self.headers.get("x-claude-code-agent-id")))
+        body = gpt_swap_advisor(gpt_translate_advisor_history(body), keep=False)
+        if agent:
+            body = relax_report_ban(body)
+        url = kimi.UPSTREAM + path
+        original, committed = body, False
+        avoid, compacted_harder = set(), False
+        for _ in range(len(accounts) + 3):
+            on_usage = None
+            if agent:
+                key = "kimi\0" + _conv_key(original)
+                count = len(original.get("messages") or [])
+                body, committed = self.compact_gpt(original, force=compacted_harder,
+                                                   committed=committed, route="kimi")
+                if body is None:
+                    return
+                sent_estimate = estimate_tokens(body)
+                shrunk = body is not original
+
+                def on_usage(total, key=key, count=count, sent=sent_estimate,
+                             shrunk=shrunk):
+                    with _gpt_usage_lock:
+                        if key not in _gpt_usage and len(_gpt_usage) >= 256:
+                            _gpt_usage.pop(next(iter(_gpt_usage)))
+                        _gpt_usage[key] = (count, total, sent, shrunk)
+
+            acct, wait = KIMI_POOL.claim(avoid)
+            if acct is None:
+                if wait is None:
+                    status, kind, message, wait = (
+                        503, "api_error",
+                        "every Kimi key devinx holds was refused: replace it "
+                        "with `devinx --kimi-add <name>`", None)
+                else:
+                    status, kind, message = (
+                        429, "rate_limit_error",
+                        f"every Kimi account is spent; the next is free in "
+                        f"{wait:.0f}s")
+                print(f"route=kimi model={model} status={status} "
+                      f"(no account)", flush=True)
+                if committed:
+                    self.send_sse_error(kind, message)
+                else:
+                    self.send_error_json(status, kind, message,
+                                         int(wait) + 1 if wait else None)
+                self.close_connection = True
+                return
+            print(f"kimi: account={acct['name']} model={upstream}", flush=True)
+            outgoing = kimi.prepare(body, upstream)
+            why = {}
+
+            def on_error(status, text, acct=acct, sent=body, why=why,
+                         may_compact=agent and not compacted_harder):
+                refusal = kimi.account_refusal(status, text)
+                if refusal == "auth":
+                    KIMI_POOL.invalidate(acct)
+                    avoid.add(acct["key"])
+                    why["retry"] = "account"
+                    return RETRY
+                if refusal == "quota":
+                    headers = getattr(self, "upstream_headers", None) or {}
+                    KIMI_POOL.block(acct, kimi.block_seconds(
+                        acct, headers.get("retry-after"), SESSION), f"{status}")
+                    avoid.add(acct["key"])
+                    why["retry"] = "account"
+                    return RETRY
+                return kimi_error(status, text, sent, why if may_compact else None)
+
+            sent = self.relay(json.dumps(outgoing).encode(), model, url, "kimi",
+                              strip=GPT_STRIPPED, committed=committed,
+                              on_usage=on_usage, on_error=on_error,
+                              add_headers={"x-api-key": acct["key"]},
+                              final_error=lambda status, text, b, sent=body:
+                                  kimi_error(status, text, sent),
+                              tag_signatures=path == "/v1/messages")
+            if sent is not RETRY:
+                return
+            if why.get("retry") == "compact":
+                compacted_harder = True
+        if committed:
+            self.send_sse_error("api_error", "Kimi refused every attempt")
+        else:
+            self.send_error_json(502, "api_error", "Kimi refused every attempt")
+        self.close_connection = True
+
+    def compact_gpt(self, body, force=False, committed=False, route="gpt"):
+        """Reduce a GPT (or, with route="kimi", a Kimi) subagent's history
+        before it outgrows the window. Each route is summarised by its own
+        models, so nothing crosses to another provider.
 
         Returns (body, committed): the body to send — the same object when
         nothing had to change — and whether a 200 and an SSE stream were
@@ -5172,7 +5426,8 @@ class Handler(BaseHTTPRequestHandler):
         """
         messages = body.get("messages") or []
         estimated = estimate_tokens(body)
-        key = "gpt\0" + _conv_key(body)
+        namespace = route + "\0"
+        key = namespace + _conv_key(body)
         with _gpt_usage_lock:
             reported = _gpt_usage.get(key)
         measured = estimated
@@ -5183,7 +5438,8 @@ class Handler(BaseHTTPRequestHandler):
                 {"messages": messages[reported[0]:]})
         elif reported and reported[2]:
             measured = int(estimated * reported[1] / reported[2])
-        compact_at = gpt_compact_at(body.get("model"))
+        compact_at = (kimi.compact_at if route == "kimi"
+                      else gpt_compact_at)(body.get("model"))
         if force:
             # The server refused this size: whatever the counts said, they
             # were short. Cut to well under the limit by the estimate itself.
@@ -5194,11 +5450,12 @@ class Handler(BaseHTTPRequestHandler):
         # estimate is from the server's count makes it cut where the server's
         # count would, in both directions.
         limit = max(1000, int(compact_at * estimated / max(measured, 1)))
-        print(f"compaction(gpt): {measured} tokens measured ({estimated} "
+        print(f"compaction({route}): {measured} tokens measured ({estimated} "
               f"estimated), over {compact_at}", flush=True)
         turn = Turn(conn=getattr(self, "connection", None))
-        profile = CompactProfile(limit, once=_summarise_once_gpt,
-                                 model=body.get("model"), namespace="gpt\0")
+        profile = CompactProfile(limit, once=(_summarise_once_kimi if route == "kimi"
+                                              else _summarise_once_gpt),
+                                 model=body.get("model"), namespace=namespace)
         result = {}
 
         def work():
@@ -5209,8 +5466,8 @@ class Handler(BaseHTTPRequestHandler):
                 result["gone"] = True
             except Exception as e:
                 # Compaction is a rescue, never a new way to fail.
-                print(f"compaction(gpt): {type(e).__name__}: {e}; forwarding "
-                      f"as is", flush=True)
+                print(f"compaction({route}): {type(e).__name__}: {e}; "
+                      f"forwarding as is", flush=True)
                 result["body"] = body
             finally:
                 _request_local.turn = None
@@ -5237,7 +5494,8 @@ class Handler(BaseHTTPRequestHandler):
                     turn.gone.set()
                 last = time.time()
         if result.get("gone"):
-            print("compaction(gpt): client left during the summary", flush=True)
+            print(f"compaction({route}): client left during the summary",
+                  flush=True)
             self.close_connection = True
             return None, committed
         return result.get("body", body), committed
@@ -5520,7 +5778,7 @@ class Handler(BaseHTTPRequestHandler):
         return advice, ok
 
     def relay_events(self, response, model, label, on_usage=None, retry=False,
-                     tap=None):
+                     tap=None, transform=None):
         """Relay Messages SSE, not just its HTTP status.
 
         Hold message_start until the first content block: a failed generation
@@ -5556,6 +5814,10 @@ class Handler(BaseHTTPRequestHandler):
                     error = {"type": "api_error",
                              "message": "Upstream sent an invalid stream event"}
                     break
+                if transform is not None and data is not None:
+                    changed = transform(data)
+                    if changed is not None:
+                        frame = sse_bytes(changed)
                 if kind == "message_start" and data is not None:
                     if prefix or exposed:
                         error = {"type": "api_error",
@@ -5605,13 +5867,17 @@ class Handler(BaseHTTPRequestHandler):
         return "stream_error"
 
     def relay(self, raw, model, url, label, strip=(), on_error=None,
-              committed=False, on_usage=None, stream_attempt=0):
+              committed=False, on_usage=None, stream_attempt=0,
+              add_headers=None, final_error=None, tag_signatures=False):
         """Transparent relay. Headers pass through untouched, including the
         caller's credential unless `strip` names it; this process adds nothing
-        of its own. `on_error(status, text)` may replace an upstream error
-        with (status, type, message) of its own. `committed` means a 200 and an
+        of its own, except `add_headers` (the kimi-* route's key). `on_error(status,
+        text)` may replace an upstream error with (status, type, message) of
+        its own; `final_error(status, text, body)` does once a retry is no
+        longer possible (gpt_error by default). `committed` means a 200 and an
         SSE stream were already started: only the body follows, and an error
-        becomes an SSE error event."""
+        becomes an SSE error event. `tag_signatures` marks the thinking Kimi
+        signed (see kimi.SignatureTagger)."""
         response = None
         tap = None
         response_started = False
@@ -5620,7 +5886,9 @@ class Handler(BaseHTTPRequestHandler):
             headers = {name: value for name, value in self.headers.items()
                        if name.lower() not in REQUEST_EXCLUDED
                        and name.lower() not in strip}
-            if label in {"claude", "gpt"}:
+            if add_headers:
+                headers.update(add_headers)
+            if label in RELAYED_SSE:
                 # Keep SSE inspectable, so an error inside HTTP 200 is not
                 # counted as success. Decode anyway if upstream compresses it.
                 headers = {n: v for n, v in headers.items()
@@ -5632,6 +5900,8 @@ class Handler(BaseHTTPRequestHandler):
                                        allow_redirects=False,
                                        timeout=(15, RELAY_READ_TIMEOUT))
             _request_phase("relaying")
+            # The refusal's own headers (retry-after), for on_error to read.
+            self.upstream_headers = response.headers
             # An error body read to judge it is gone from the stream, so one
             # that is kept is written from here rather than relayed again.
             consumed = None
@@ -5650,7 +5920,8 @@ class Handler(BaseHTTPRequestHandler):
                         retry_body = json.loads(raw)
                     except (ValueError, TypeError):
                         retry_body = None
-                    replaced = (gpt_error(response.status_code, text, retry_body)
+                    replaced = ((final_error or gpt_error)(
+                                    response.status_code, text, retry_body)
                                 if isinstance(retry_body, dict) else None)
                     replaced = replaced or (502, "api_error", "Upstream retry failed")
                 if replaced is RETRY:
@@ -5679,17 +5950,33 @@ class Handler(BaseHTTPRequestHandler):
                 print(f"route={label} model={model} status={response.status_code} "
                       f"(sse) in {time.time() - relay_started:.1f}s", flush=True)
                 return
-            streaming = (self.command != "HEAD" and label in {"claude", "gpt"}
+            streaming = (self.command != "HEAD" and label in RELAYED_SSE
                          and response.status_code == 200
                          and "text/event-stream" in response.headers.get("content-type", ""))
+            # A whole JSON message whose signatures are tagged before it goes
+            # out: its length changes, so it is read first and resized.
+            rewritten = None
+            if (tag_signatures and not streaming and consumed is None
+                    and self.command != "HEAD" and response.status_code == 200
+                    and "json" in response.headers.get("content-type", "")):
+                rewritten = response.content
+                try:
+                    message = json.loads(rewritten)
+                    if isinstance(message, dict) and message.get("type") == "message":
+                        rewritten = json.dumps(kimi.tag_message(message)).encode()
+                except ValueError:
+                    pass
             response_started = True
             if not committed:
                 self.send_response(response.status_code)
                 for name, value in response.headers.items():
                     if (name.lower() not in RESPONSE_EXCLUDED
-                            and not (streaming and name.lower() in
+                            and not ((streaming or rewritten is not None)
+                                     and name.lower() in
                                      {"content-encoding", "content-length"})):
                         self.send_header(name, value)
+                if rewritten is not None:
+                    self.send_header("content-length", str(len(rewritten)))
                 self.send_header("connection", "close")
                 self.end_headers()
             # Diagnostic only, behind the same gate as the request dump: the
@@ -5704,16 +5991,33 @@ class Handler(BaseHTTPRequestHandler):
                     tap = None
             outcome = str(response.status_code)
             if streaming:
+                tagger = kimi.SignatureTagger() if tag_signatures else None
                 outcome = self.relay_events(
                     response, model, label, on_usage=on_usage,
-                    retry=label == "gpt" and stream_attempt == 0, tap=tap)
+                    retry=label in {"gpt", "kimi"} and stream_attempt == 0,
+                    tap=tap, transform=tagger.event if tagger else None)
                 if outcome is RETRY_STREAM:
                     response.close()
                     if tap is not None:
                         tap.close()
                     return self.relay(raw, model, url, label, strip=strip,
                                       on_error=on_error, committed=True,
-                                      on_usage=on_usage, stream_attempt=1)
+                                      on_usage=on_usage, stream_attempt=1,
+                                      add_headers=add_headers,
+                                      final_error=final_error,
+                                      tag_signatures=tag_signatures)
+            elif rewritten is not None:
+                if tap is not None:
+                    tap.write(rewritten)
+                self.wfile.write(rewritten)
+                self.wfile.flush()
+                # Counted by the on_usage call after the body, as for any
+                # other non-streamed response.
+                sniff = UsageSniffer()
+                try:
+                    sniff.observe(json.loads(rewritten))
+                except ValueError:
+                    pass
             elif consumed is not None:
                 self.wfile.write(consumed)
                 self.wfile.flush()

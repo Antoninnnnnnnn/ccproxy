@@ -187,6 +187,7 @@ button.t:focus-visible{outline:2px solid var(--s1);outline-offset:2px}
     <span>en vol <b id="inflight">—</b></span>
     <span>uptime <b id="uptime">—</b></span>
     <span>comptes <b id="accounts">—</b></span>
+    <span>kimi <b id="kimi">—</b></span>
     <button class="t" id="theme" type="button">thème</button>
   </div>
 </div></header>
@@ -497,6 +498,15 @@ function render(d){
     typeof a === "string" ? a
       : a.excluded ? `${a.name} (exclu : ${a.excluded})`
       : a.blocked_for ? `${a.name} (bloqué ${dur(a.blocked_for)})` : a.name
+  ).join(", ") || "—";
+  // Comptes Kimi : la part consommée des fenêtres 5 h et mensuelle, lue chez
+  // Kimi par le service, ou l'état qui les sort de la rotation.
+  $("kimi").textContent = (sv.kimi || []).map(a =>
+    a.refused ? `${a.name} (clé refusée)`
+      : a.blocked_for ? `${a.name} (bloqué ${dur(a.blocked_for)})`
+      : typeof a.used_5h === "number"
+        ? `${a.name} 5 h ${pct(a.used_5h)} · mois ${pct(a.used_month || 0)}`
+        : a.name
   ).join(", ") || "—";
 
   const total = (sw.turns_ok || 0) + (sw.turns_failed || 0) + (rl.total || 0);

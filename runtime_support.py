@@ -67,7 +67,7 @@ def build_id(directory):
     """
     root = Path(directory)
     files = [root / name for name in (
-        'devinx.py', 'runtime_support.py', 'diagnostics.py',
+        'devinx.py', 'runtime_support.py', 'diagnostics.py', 'kimi.py',
         'tools/log_stats.py', 'tools/dashboard.html')]
     try:
         files.extend(sorted((root / 'descriptors').glob('*.fdp')))

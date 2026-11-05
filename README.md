@@ -17,10 +17,10 @@ One port, no external binary, nothing written into your agent's config.
                                  │
                     routed on the model name
                                  │
-         ┌───────────────────────┼───────────────────────┐
-     claude-*                swe-2-*                  gpt-*
-  api.anthropic.com      server.codeium.com    chatgpt.com/backend-api
-      relayed                 SWE-2                  relayed
+         ┌──────────────────┬────┴─────────────┬──────────────────┐
+     claude-*            swe-2-*             gpt-*              kimi-*
+  api.anthropic.com  server.codeium.com  chatgpt.com/...   api.kimi.com/coding
+      relayed             SWE-2             relayed       relayed, devinx's key
 ```
 
 The subagents are real subagents of the client you launched: same tools, same
@@ -130,6 +130,7 @@ whatever your Codex config already says; only what it delegates changes.
 | `--or` | add the orchestrator skill; implies the client flag it is used with (needs `DEVINX_SWE=1`; skipped with a warning otherwise) |
 | `--plain` | cancel `DEVINX_ALWAYS=1` for this one run (an explicit `--devin`/`--or`/`--codex` still wins) |
 | `--` | everything after it passes through verbatim |
+| `--kimi-add [name]`, `--kimi-list`, `--kimi-remove name` | manage the Kimi Code accounts (see [Kimi models](#kimi-models-in-claude-code)); nothing is launched |
 | `--status`, `--doctor`, `--explain` | local diagnostics (see [stability controls](docs/stability.md)); recognised in the first position or after devinx's own flags (`devinx --d --status`), as long as the position is unambiguous |
 
 | variable | effect |
@@ -145,6 +146,8 @@ whatever your Codex config already says; only what it delegates changes.
 | `DEVINX_LOG` | override the log file path; defaults to `devinx.log` in the data directory |
 | `DEVINX_API_KEYS` / `DEVINX_API_KEY` | comma-separated Devin credentials (or a single one), instead of every `credentials.toml` under the data directory |
 | `DEVINX_OWNED_PATHS` | `os.pathsep`-separated paths/globs the `--or` hooks enforce as owned files when a subagent's brief declares no `<owned-paths>` block, and for the main thread (see [hooks](#hooks) below); unset means unenforced |
+| `DEVINX_KIMI_KEYS` | comma-separated Kimi Code keys, instead of the files `--kimi-add` writes |
+| `DEVINX_KIMI_COMPACT_AT` | override the Kimi subagent compaction threshold (default 90% of each model's window) |
 | `DEVINX_DESCRIPTORS` | an extra directory of protobuf `*.fdp` descriptors to load, ahead of the packaged ones |
 
 `--or` is separate from the client flags on purpose: the SWE-2 layer changes
@@ -524,6 +527,65 @@ Linux, installs and starts the systemd user unit `sidecar/claude-code-proxy.serv
 (port 18765, Codex-native compaction). A sidecar already running is not
 restarted, since that cuts its GPT turns: pass `--restart`, or restart it when
 idle. A unit edited by hand is left alone unless `--force`.
+
+### Kimi models in Claude Code
+
+A Kimi Code subscription comes with an API key (`sk-kimi-...`, the one its CLI
+logs in with) for `api.kimi.com/coding`, which speaks the Messages API natively:
+thinking with signatures, tool use, deferred tools, prompt caching,
+`count_tokens`. So `kimi-*` is relayed rather than translated, with a key
+devinx holds in place of the client's own credential — Claude Code's claude.ai
+token never leaves for Moonshot.
+
+```sh
+devinx --kimi-add            # prompts for the key, checks it with Kimi, saves it
+devinx --kimi-add work       # a second account, under its own name
+devinx --kimi-list           # each account and its 5-hour and monthly usage
+devinx --kimi-remove work
+```
+
+Keys live in `<data dir>/kimi/<name>.key` (mode 0600), one account per file,
+and the running service picks a new one up within 30 seconds; `DEVINX_KIMI_KEYS`
+replaces the files. While at least one account is saved, `/model` lists
+**Kimi K3.1 Pro** (`kimi-k3.1-pro`), **K3**, **K2.8** (`kimi-for-coding`) and
+**K3.1 Pro Fast** (`kimi-k3.1-pro-highspeed`, twice the quota), and the
+subagents `kimi-{pro,k3}-{low,high,max}` are injected beside the `gpt-*` ones.
+Any other id of Kimi's catalog works as `kimi-<id>` (`/model kimi-k3-256k`).
+
+- **Ids are checked.** Kimi answers 200 for any model name, running its
+  default model instead, so a typo would go unnoticed: devinx refuses a
+  `kimi-*` id that is neither in its table nor in Kimi's live catalog.
+- **Effort.** Kimi reasons at low, high and max; the slider's medium goes to
+  high and xhigh to max. `thinking: disabled` is dropped, since K3.1 Pro
+  refuses it and every current model thinks always.
+- **Signatures.** Kimi's thinking signatures are tagged `kimi:` on the way out
+  and untagged on the way back, so a conversation moved to `claude-*` drops
+  them (Anthropic refuses a signature it did not sign) the way it drops GPT's.
+  A `kimi-k3.1-pro` session with tool use was resumed on Claude without error;
+  there the client had already left the thinking out, so the drop itself is
+  covered by the tests rather than by that run.
+- **What Kimi refuses.** Claude Code announces a tool loaded mid-conversation
+  with a `tool_addition` block in a `{role: "system"}` turn, and Kimi rejects
+  the whole request over it ("Invalid request Error") while it takes the turn's
+  text; devinx drops the block, the tool being in `tools` already. The advisor
+  server tool is taken out, since nobody would run it.
+- **Accounts.** Turns go round robin, least recently used first. A refusal
+  for quota (429) blocks that account until its window resets — from
+  `retry-after`, else from Kimi's `/v1/usages` — and the turn moves to the next
+  account at once, which is safe because a refusal arrives before anything is
+  sent to the client. A key Kimi rejects is set aside until it is replaced.
+  With every account spent the client gets a 429 `rate_limit_error` with
+  `retry-after`: a 5-hour window is not something to hold a turn through.
+- **Context.** Kimi refuses an overflow with the limit and not the size
+  ("Your request exceeded k3-256k model token limit: 262144"); devinx rewrites
+  it as `prompt is too long: N tokens > M maximum`. Subagents are compacted by
+  devinx at 90% of the window like GPT ones, with the summary written by Kimi
+  through whichever account is free, and a context refusal is retried once,
+  compacted harder. The main session compacts itself at the same point
+  (`autoCompactWindow` per model).
+- The dashboard shows each Kimi account's 5-hour and monthly usage, or why it
+  is out of rotation. The route refuses browser-originated requests, as the
+  SWE-2 and GPT routes do. Claude Code only: Codex has no `kimi-*` route.
 
 ### Why the SWE-2 route refuses browsers
 

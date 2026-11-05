@@ -23,6 +23,7 @@ import sys
 import time
 import urllib.request
 from runtime_support import build_id, hello_proof, service_secret, startup_lock, swe_enabled
+import kimi
 
 def _port_env(name, default):
     """A bad DEVINX_PORT must not crash the launcher before main() ever runs
@@ -254,6 +255,46 @@ def gpt_agents():
     return out
 
 
+# Kimi subagents, one per model and effort, offered while a Kimi account is
+# saved (devinx --kimi-add). Kimi reasons at low, high and max.
+KIMI_AGENT_MODELS = (
+    ("pro", "kimi-k3.1-pro", "Kimi K3.1 Pro",
+     "the strongest Kimi: implementation, debugging, a second opinion beside "
+     "Claude and GPT"),
+    ("k3", "kimi-k3", "Kimi K3",
+     "a second Kimi voice, for implementation, exploration or review"),
+)
+KIMI_AGENT_EFFORTS = ("low", "high", "max")
+
+
+def kimi_agents():
+    if not kimi.configured(data_dir()):
+        return {}
+    out = {}
+    for short, model, label, use in KIMI_AGENT_MODELS:
+        for effort in KIMI_AGENT_EFFORTS:
+            out[f"kimi-{short}-{effort}"] = {
+                "description": (
+                    f"{label} subagent at {effort} effort, on the user's Kimi "
+                    f"Code subscription through devinx: {use}. Long runs are "
+                    f"compacted by devinx (Kimi summarises Kimi). Spends Kimi "
+                    f"quota, not claude.ai, ChatGPT or SWE-2."),
+                "prompt": (
+                    f"You are a {label} coding subagent inside Claude Code. "
+                    f"Execute the delegated task directly with your available "
+                    f"tools, verify your result, and return a concise summary to "
+                    f"the parent agent. When the task names a report or any "
+                    f"other file to write, write it at that path: an explicit "
+                    f"request outranks any general rule against report files, "
+                    f"and the file is the deliverable, so never send its "
+                    f"contents as a message instead. When asked about your "
+                    f"model identity, answer `{model}`."),
+                "model": model,
+                "effort": effort,
+            }
+    return out
+
+
 def packaged_agents():
     """Parse agents/*.md into the JSON shape `claude --agents` expects.
 
@@ -335,7 +376,7 @@ def packaged_agents():
         if blocked:
             agent["disallowedTools"] = blocked
         out[name] = agent
-    for name, agent in gpt_agents().items():
+    for name, agent in {**gpt_agents(), **kimi_agents()}.items():
         if os.environ.get("DEVINX_SUBAGENT_MCP") != "1":
             agent["disallowedTools"] = ["mcp__*"]
         # A file of the same name in agents/ wins: that is where an override goes.
@@ -378,12 +419,32 @@ GPT_AUTO_COMPACT_WINDOW = {
 }
 
 
+# The Kimi rows of /model, while a Kimi account is saved. Same mechanism as
+# GPT: behavesAs lends the effort slider (devinx maps it onto Kimi's low, high
+# and max) and each window is stated, since Opus's 1M is wrong for the 256k
+# models.
+KIMI_PICKER = (
+    ("kimi-k3.1-pro", "Kimi K3.1 Pro", "K3.1 Pro · Kimi Code, strongest"),
+    ("kimi-k3", "Kimi K3", "K3 · Kimi Code"),
+    ("kimi-for-coding", "Kimi K2.8", "K2.8 Preview · Kimi Code"),
+    ("kimi-k3.1-pro-highspeed", "Kimi K3.1 Pro Fast",
+     "K3.1 Pro Highspeed · Kimi Code, twice the quota"),
+)
+
+
+def kimi_auto_compact_window(model):
+    # Claude Code compacts its fixed 33k buffer short of the window: land that
+    # on 90% of the model's window, where devinx compacts a subagent too.
+    return kimi.context_tokens(model) * 9 // 10 + 33000
+
+
 def picker_settings(passthrough):
-    """`--settings` carrying the GPT picker rows, unless the user passed their
-    own --settings: the client takes one, and theirs must win."""
+    """`--settings` carrying the GPT (and Kimi) picker rows, unless the user
+    passed their own --settings: the client takes one, and theirs must win."""
     if any(a == "--settings" or a.startswith("--settings=") for a in passthrough):
-        sys.stderr.write("devinx: --settings was already given; the GPT rows "
-                         "were not added to /model (type /model gpt-6.1-sol)\n")
+        sys.stderr.write("devinx: --settings was already given; the GPT and "
+                         "Kimi rows were not added to /model (type /model "
+                         "gpt-6.1-sol)\n")
         return []
     # behavesAs lends each row the client-side handling of a model Claude
     # Code knows, the effort slider included; Opus 5.5 has exactly GPT-6's
@@ -396,6 +457,12 @@ def picker_settings(passthrough):
     # window, above what these GPT models are configured to use.
     window = {mid: {"autoCompactWindow": GPT_AUTO_COMPACT_WINDOW[mid]}
               for mid, _, _ in GPT_PICKER}
+    if kimi.configured(data_dir()):
+        options += [{"model": mid, "label": label, "description": desc,
+                     "behavesAs": GPT_BEHAVES_AS}
+                    for mid, label, desc in KIMI_PICKER]
+        window.update({mid: {"autoCompactWindow": kimi_auto_compact_window(mid)}
+                       for mid, _, _ in KIMI_PICKER})
     return ["--settings", json.dumps({"modelPicker": {"options": options},
                                       "modelSettings": window})]
 
@@ -1092,7 +1159,28 @@ def _diagnostic_flag(argv):
     return None
 
 
+KIMI_FLAGS = ("--kimi-add", "--kimi-list", "--kimi-remove")
+
+
+def _kimi_flag(argv):
+    """(flag, what follows it) for an account command, or None.
+
+    Recognised behind other flags too (a shell wrapper that always passes
+    `--devin --dangerously-skip-permissions` first), but never past `--` or
+    behind a positional, where it would be text meant for the client."""
+    for i, a in enumerate(argv):
+        if a in KIMI_FLAGS:
+            return a, argv[i + 1:]
+        if a == "--" or not a.startswith("-"):
+            return None
+    return None
+
+
 def main():
+    account = _kimi_flag(sys.argv[1:])
+    if account is not None:
+        # Account management, not a session: nothing is started or launched.
+        return kimi.main(account[0], account[1], data_dir())
     flag = _diagnostic_flag(sys.argv[1:])
     if flag is not None:
         import diagnostics

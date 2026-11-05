@@ -442,7 +442,9 @@ class PickerSettingsTests(unittest.TestCase):
 
     def test_rows_effort_and_window(self):
         import launcher
-        flag, raw = launcher.picker_settings([])
+        # The Kimi rows join only with a Kimi account saved; not this test's.
+        with mock.patch.object(launcher.kimi, 'configured', return_value=False):
+            flag, raw = launcher.picker_settings([])
         self.assertEqual(flag, '--settings')
         settings = json.loads(raw)
         rows = settings['modelPicker']['options']
